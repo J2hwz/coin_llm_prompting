@@ -1,0 +1,59 @@
+# Instructions
+
+You are controlling an agent in a grid-based environment with partial observability. The agent can move in four directions: up, down, left, and right. The environment contains walls, open spaces, and a goal location, with some areas being hidden from view. The following symbols are used in the grid representation:
+
+Legend:
+---------------
+#: Wall
+*: Hidden Space (reveals a Wall, Goal or Open Space when observed)
+_: Open Space (revealed, can be visited)
+P: Already visited space
+G: Goal
+A: Current agent position
+----------------
+
+Your objective is to navigate from the current position (A) to the goal (G) while avoiding walls (#). Importantly, the agent should aim to reach the goal using the least amount of steps possible. You can only see a portion of the grid, with remaining tiles being marked as hidden (*). Stepping towards hidden tiles reveals the underlying tile in a 3x3 tile square centered on the agent, or until the nearest wall is encountered. You must decide your next move based on this limited information.
+
+You will receive the current state of the grid as a NxM matrix of symbols separated by whitespaces, and with coordinates for each row an column. For example, given the 4x5 grid:
+
+  0 1 2 3 4
+0 * * * * *
+1 # _ _ G *
+2 # A _ * *
+3 # # # * *
+
+The goal is in position (1,3), while the agent's position A is (2,1). Additionally, at each turn, you can decide to save a brief note to guide your future actions. Your note will be appended to the previous notes, and will be used to guide your future actions.
+
+The agent's possible actions at each step are:
+
+Actions:
+- UP: Move Up
+- DOWN: Move Down
+- LEFT: Move Left
+- RIGHT: Move Right
+
+Your final answer should be a valid JSON object provided in the following form:
+
+```
+{
+  "action": "<UP|DOWN|LEFT|RIGHT>",
+  "note": "<your note here, or KEEP or N/A>"
+}
+```
+
+DO NOT INCLUDE ANY `json` or `jsonb` in your response NOR TICK MARKS LIKE THIS: ```json ```. Start with { and end with } exactly.
+
+# Inputs
+
+Next grid state:
+
+  0 1 2 3 4 5 6
+0 * * * * * * *
+1 # _ _ G * * *
+2 # P A _ * * *
+3 # _ _ _ * * *
+4 # * * * * * *
+
+<BEGINNING OF NOTES>
+ The agent (me) is at position (2,1). I think the goal is around position (3, 5), but I'm not sure. I will explore down and to the right.First I will move right to (2, 2).
+</END OF NOTES>

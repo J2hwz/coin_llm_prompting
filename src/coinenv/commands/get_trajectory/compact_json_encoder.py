@@ -1,0 +1,123 @@
+"""Custom JSON encoder that formats output compactly while maintaining readability."""
+
+from __future__ import annotations
+
+import json
+
+
+class CompactJSONEncoder(json.JSONEncoder):
+    """A JSON Encoder that puts small containers on single lines.
+
+    This encoder intelligently formats JSON output by placing small containers
+    (lists, tuples, dicts) on a single line when they meet size criteria, while
+    expanding larger containers across multiple lines for readability.
+
+    Attributes:
+        CONTAINER_TYPES: Tuple of container datatypes that can hold primitives or other containers.
+        MAX_WIDTH: Maximum character width for a container to be formatted on a single line.
+        MAX_ITEMS: Maximum number of items in a container to be formatted on a single line.
+        MULTILINE_KEYS: Set of key names whose values should always be formatted on multiple lines.
+        indentation_level: Current nesting depth for proper indentation.
+        current_key: The current object key being encoded (used for multiline key detection).
+    """
+
+    CONTAINER_TYPES = (list, tuple, dict)
+    """Container datatypes include primitives or other containers."""
+
+    MAX_WIDTH = 150
+    """Maximum width of a container that might be put on a single line."""
+
+    MAX_ITEMS = 10
+    """Maximum number of items in container that might be put on single line."""
+
+    MULTILINE_KEYS = {"grid_state"}
+    """Keys whose values should always be formatted on multiple lines."""
+
+    def __init__(self, *args, **kwargs):
+        # using this class without indentation is pointless
+        if kwargs.get("indent") is None:
+            kwargs["indent"] = 4
+        super().__init__(*args, **kwargs)
+        self.indentation_level = 0
+        self.current_key = None
+
+    def encode(self, o):
+        """Encode JSON object *o* with respect to single line lists."""
+        if isinstance(o, (list, tuple)):
+            return self._encode_list(o)
+        if isinstance(o, dict):
+            return self._encode_object(o)
+        return json.dumps(
+            o,
+            skipkeys=self.skipkeys,
+            ensure_ascii=self.ensure_ascii,
+            check_circular=self.check_circular,
+            allow_nan=self.allow_nan,
+            sort_keys=self.sort_keys,
+            indent=self.indent,
+            separators=(self.item_separator, self.key_separator),
+            default=self.default if hasattr(self, "default") else None,
+        )
+
+    def _encode_list(self, o):
+        if self._put_on_single_line(o):
+            return "[" + ", ".join(self.encode(el) for el in o) + "]"
+        self.indentation_level += 1
+        output = [self.indent_str + self.encode(el) for el in o]
+        self.indentation_level -= 1
+        return "[\n" + ",\n".join(output) + "\n" + self.indent_str + "]"
+
+    def _encode_object(self, o):
+        if not o:
+            return "{}"
+
+        # ensure keys are converted to strings
+        o = {str(k) if k is not None else "null": v for k, v in o.items()}
+
+        if self.sort_keys:
+            o = dict(sorted(o.items(), key=lambda x: x[0]))
+
+        if self._put_on_single_line(o):
+            return (
+                "{ "
+                + ", ".join(
+                    f"{self.encode(k)}: {self.encode(el)}" for k, el in o.items()
+                )
+                + " }"
+            )
+
+        self.indentation_level += 1
+        output = []
+        for k, v in o.items():
+            # Set current key context before encoding the value
+            self.current_key = k
+            encoded_value = self.encode(v)
+            output.append(f"{self.indent_str}{self.encode(k)}: {encoded_value}")
+            self.current_key = None
+        self.indentation_level -= 1
+
+        return "{\n" + ",\n".join(output) + "\n" + self.indent_str + "}"
+
+    def iterencode(self, o, **kwargs):
+        """Required to also work with `json.dump`."""
+        return self.encode(o)
+
+    def _put_on_single_line(self, o):
+        # Force multiline formatting for values of specific keys
+        if self.current_key in self.MULTILINE_KEYS:
+            return False
+        return (
+            len(o) <= self.MAX_ITEMS
+            and len(str(o)) - 2 <= self.MAX_WIDTH
+        )
+
+    @property
+    def indent_str(self) -> str:
+        if isinstance(self.indent, int):
+            return " " * (self.indentation_level * self.indent)
+        elif isinstance(self.indent, str):
+            return self.indentation_level * self.indent
+        else:
+            raise ValueError(
+                f"indent must either be of type int or str (is: {type(self.indent)})"
+            )
