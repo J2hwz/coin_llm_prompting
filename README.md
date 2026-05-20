@@ -2,6 +2,8 @@
 
 Experiments running LLMs as agents in gridworld environments, collecting trajectories with token-level logprobs for mechanistic interpretability analysis.
 
+Adapted from [SPAR-Telos/reveng](https://github.com/SPAR-Telos/reveng).
+
 ---
 
 ## Setup

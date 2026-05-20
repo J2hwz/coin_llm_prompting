@@ -69,22 +69,21 @@ class Action(Enum):
         """Convert Action to string."""
         return {"0": "LEFT", "1": "RIGHT", "2": "UP", "3": "DOWN"}[str(self.value)]
 
+# Commented out because bug in calling of trajectory object, plus not used elsewhere
+# def load_trajectory_from_file(file_path: str | Path) -> Trajectory:
+#     """Read a trajectory from disk."""
+#     data = json.loads(Path(file_path).read_text())
 
-def load_trajectory_from_file(file_path: str | Path) -> Trajectory:
-    """Read a trajectory from disk."""
-    data = json.loads(Path(file_path).read_text())
-
-    steps = [Step(**step_dict) for step_dict in data.get("steps", [])]
-    action_space = data.get("action_space") or []
-    final_reward = data.get("final_reward")
-    traj_metadata = data.get("traj_metadata")
-    return Trajectory(
-        steps=steps,
-        action_space=action_space,
-        final_reward=final_reward,
-        traj_metadata=traj_metadata,
-    )
-
+#     steps = [Step(**step_dict) for step_dict in data.get("steps", [])]
+#     action_space = data.get("action_space") or []
+#     final_reward = data.get("final_reward")
+#     traj_metadata = data.get("traj_metadata")
+#     return Trajectory(
+#         steps=steps,
+#         action_space=action_space,
+#         final_reward=final_reward,
+#         traj_metadata=traj_metadata,
+#     )
 
 @dataclass
 class PreferenceResult:
