@@ -30,7 +30,7 @@ from coinenv.commands.get_trajectory.rate_limiter import (
     RateLimiter,
 )
 from coinenv.environment_generator.custom_minigrid import CoinNavigationEnv, Simple2DNavigationEnv
-from coinenv.environment_generator.utils import get_all_dead_ends
+from coinenv.environment_generator.utils import get_all_dead_ends, manhattan_distance
 from coinenv.environment_generator.wrappers.text_obs_wrapper import (
     FullObservabilityTextWrapper,
 )
@@ -46,7 +46,6 @@ def _resolve_output(path: str) -> Path:
     """Resolve path relative to DATA_DIR unless it is already absolute."""
     p = Path(path)
     return p if p.is_absolute() else DATA_DIR / p
-
 
 def get_trajectory(
     grid_size: int = 5,
@@ -489,650 +488,6 @@ def get_trajectories(
             hf_token=hf_token,
         )
     return None
-
-
-def get_trajectory_deadend_env(
-    grid_size: int = 11,
-    grid_complexity: float = 0.8,
-    target_dead_ends: int | None = None,
-    place_at_dead_ends: bool = False,
-    coin_placement: Literal["random", "dead_end"] | None = None,
-    max_attempts: int = 1000,
-    max_steps_per_trajectory: int = 50,
-    max_tokens: int = 10000,
-    temperature: float = 0.7,
-    top_p: float = 0.95,
-    top_logprobs: int = 5,
-    seed: int = 42,
-    reasoning_effort: Literal["low", "medium", "high"] = "low",
-    model_name: str = "together_ai/openai/gpt-oss-20b",
-    template_name: str = "grid_full_observability_hidden_goals.j2",
-    observation_placeholders: list[str] = ["grid_state"],
-    output_path: str = "get_trajectory_deadend_example_output.json",
-    verbose: bool = False,
-    enable_dynamic_max_steps: bool = False,
-):
-    """Generate an agent trajectory in a dead-end constrained navigation environment and save detailed results to JSON.
-
-    Creates a Simple2DNavigationEnv with an optional dead-end count constraint and optional coin
-    placement. Environments are repeatedly generated until one matching the target_dead_ends count
-    is found (up to max_attempts). Follows the same output format as get_trajectory.
-
-    Args:
-        grid_size: Size of the square grid environment.
-        grid_complexity: Complexity level of the grid (0.0 = open room, 1.0 = perfect maze).
-        target_dead_ends: Exact number of dead ends required in the generated maze. If None,
-            the first generated environment is used without constraint.
-        place_at_dead_ends: If True, place the agent start and goal at dead-end cells.
-        coin_placement: Where to place the coin. "random" places it in any open cell;
-            "dead_end" places it at a dead-end cell (falls back to random if none available);
-            None places no coin.
-        max_attempts: Maximum number of generation attempts when target_dead_ends is set.
-        max_steps_per_trajectory: Maximum number of steps to generate in the trajectory.
-        max_tokens: Maximum tokens for model generation per step.
-        temperature: Sampling temperature for the model (higher = more random).
-        top_p: Nucleus sampling parameter (cumulative probability threshold).
-        top_logprobs: Number of top log probabilities to return for each token.
-        seed: Random seed for reproducibility.
-        reasoning_effort: Reasoning effort level for the model ("low", "medium", or "high").
-        model_name: Name of the model in format "provider/model_id".
-        template_name: Name of the Jinja2 template file to use for prompts.
-        observation_placeholders: List of placeholder names in the prompt template.
-        output_path: Path to save the output JSON file.
-        verbose: If True, print detailed logging during trajectory generation.
-        enable_dynamic_max_steps: If True, override max_steps_per_trajectory with a dynamic
-            value based on 1.5x the A* optimal path length.
-
-    Returns:
-        None. Results are saved to the specified output_path.
-
-    The output JSON structure follows the format expected by the trace viewer:
-        - grid_params: Grid configuration including dead-end count, coin placement, start/goal
-            positions, A* distance, and legend.
-        - model_params: Model configuration (name, provider, sampling parameters, seed).
-        - prompt: Prompt template with token-level annotations.
-        - steps: List of trajectory steps with grid state, action, output tokens, and probabilities.
-    """
-    output_path = str(_resolve_output(output_path))
-    # Build environment, retrying until target_dead_ends is matched (if specified)
-    base_env_unwrapped = None
-    for attempt in range(max_attempts):
-        env_class = CoinNavigationEnv if coin_placement is not None else Simple2DNavigationEnv
-        candidate = env_class(
-            size=grid_size,
-            complexity=grid_complexity,
-            place_at_dead_ends=place_at_dead_ends,
-        )
-        candidate.reset()
-        if target_dead_ends is None or len(get_all_dead_ends(candidate)) == target_dead_ends:
-            base_env_unwrapped = candidate
-            break
-        candidate.close()
-
-    if base_env_unwrapped is None:
-        raise RuntimeError(
-            f"Could not generate an environment with {target_dead_ends} dead ends "
-            f"after {max_attempts} attempts (size={grid_size}, complexity={grid_complexity})."
-        )
-
-    actual_dead_ends = len(get_all_dead_ends(base_env_unwrapped))
-
-    # Place coin if requested
-    coin_pos = None
-    if coin_placement is not None:
-        excluded = {tuple(base_env_unwrapped.agent_pos), tuple(base_env_unwrapped.goal_pos)}
-        if coin_placement == "dead_end":
-            candidates = [
-                (x, y) for (x, y) in get_all_dead_ends(base_env_unwrapped)
-                if (x, y) not in excluded
-            ]
-            if not candidates:
-                logger.warning("No valid dead end for coin placement; falling back to random.")
-                coin_placement = "random"
-        if coin_placement == "random":
-            candidates = [
-                (x, y)
-                for x in range(1, base_env_unwrapped.width - 1)
-                for y in range(1, base_env_unwrapped.height - 1)
-                if base_env_unwrapped.grid.get(x, y) is None and (x, y) not in excluded
-            ]
-        if candidates:
-            coin_pos = random.choice(candidates)
-            base_env_unwrapped.put_obj(Ball("yellow"), *coin_pos)
-
-    base_env = FullObservabilityTextWrapper(base_env_unwrapped)
-
-    # Load template and create agent
-    template_path = Path(__file__).parent.parent.parent / "templates" / template_name
-    agent = LLMAgent(model_name=model_name, template_path=template_path)
-    model_id = "/".join(model_name.split("/")[1:])
-    provider = model_name.split("/")[0]
-    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
-
-    traj = generate_trajectory(
-        env=base_env,
-        agent=agent,
-        max_steps_per_trajectory=max_steps_per_trajectory,
-        generation_kwargs={
-            "top_logprobs": top_logprobs,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "reasoning_effort": reasoning_effort,
-            "seed": seed,
-        },
-        verbose=verbose,
-        enable_dynamic_max_steps=enable_dynamic_max_steps,
-        skip_reset=True,
-    )
-
-    grid_params = {}
-    grid_params["grid_width"] = base_env_unwrapped.width
-    grid_params["grid_height"] = base_env_unwrapped.height
-    grid_params["grid_complexity"] = grid_complexity
-    grid_params["target_dead_ends"] = target_dead_ends
-    grid_params["actual_dead_ends"] = actual_dead_ends
-    grid_params["place_at_dead_ends"] = place_at_dead_ends
-    grid_params["coin_placement"] = coin_placement
-    grid_params["coin_pos"] = list(coin_pos) if coin_pos is not None else None
-    grid_params["fully_observable"] = True
-    grid_params["astar_distance"] = traj.traj_metadata["astar_distance"]
-    grid_params["agent_start_coordinates"] = traj.traj_metadata["agent_start_coordinates"]
-    grid_params["goal_coordinates"] = traj.traj_metadata["goal_coordinates"]
-    grid_params["legend"] = base_env.grid_cells
-
-    grid_symbols = [cell["symbol"] for cell in base_env.grid_cells.values()]
-
-    model_params = {}
-    model_params["model_id"] = model_id
-    model_params["provider"] = provider
-    model_params["interface"] = "litellm"
-    model_params["template_name"] = template_name
-    model_params["n_interactions_in_context"] = 0
-    model_params["max_tokens"] = max_tokens
-    model_params["max_steps_per_trajectory"] = max_steps_per_trajectory
-    model_params["temperature"] = temperature
-    model_params["reasoning_effort"] = reasoning_effort
-    model_params["top_p"] = top_p
-    model_params["top_logprobs"] = top_logprobs
-    model_params["seed"] = seed
-
-    prompt = {}
-    render_kwargs = {"grid_state": "{{grid_state}}"}
-    template = agent._template.render(**render_kwargs)
-    formatted_template: str = tokenizer.apply_chat_template(
-        [{"role": "user", "content": template}],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    template_tokens = to_dic_list(formatted_template, tokenizer)
-
-    observation_placeholder = "{{" + observation_placeholders[0] + "}}"
-    prefix, suffix = formatted_template.split(observation_placeholder)
-    raw_prefix, raw_suffix = template.split(observation_placeholder)
-    prompt["prompt_template"] = formatted_template
-    prompt["prompt_template_n_tokens"] = len(template_tokens)
-    prompt["prompt_prefix_tokens"] = to_dic_list(prefix, tokenizer)
-    raw_prefix_tokens = to_dic_list(raw_prefix, tokenizer)
-    start_raw_prefix_idx = len(prompt["prompt_prefix_tokens"]) - len(raw_prefix_tokens)
-    for i in range(start_raw_prefix_idx):
-        prompt["prompt_prefix_tokens"][i]["token_groups"] += ["template"]
-    prompt["prompt_prefix_n_tokens"] = len(prompt["prompt_prefix_tokens"])
-    prompt["prompt_placeholder_tokens"] = to_dic_list(
-        observation_placeholder, tokenizer, groups=["prompt", "placeholder"]
-    )
-    prompt["prompt_placeholder_n_tokens"] = len(prompt["prompt_placeholder_tokens"])
-    prompt["prompt_suffix_tokens"] = to_dic_list(suffix, tokenizer)
-    raw_suffix_tokens = to_dic_list(raw_suffix, tokenizer)
-    start_raw_suffix_idx = len(prompt["prompt_suffix_tokens"]) - len(raw_suffix_tokens) + 1
-    for i in range(
-        len(prompt["prompt_suffix_tokens"]) - start_raw_suffix_idx,
-        len(prompt["prompt_suffix_tokens"]) - 1,
-    ):
-        prompt["prompt_suffix_tokens"][i]["token_groups"] += ["template"]
-    prompt["prompt_suffix_n_tokens"] = len(prompt["prompt_suffix_tokens"])
-
-    steps = []
-    for step_id, traj_step in enumerate(traj.steps):
-        step_dic = {}
-        step_dic["step_id"] = step_id
-        step_dic["grid_state"] = traj_step.observation.split("\n")
-        step_dic["grid_state_tokens"] = to_dic_list(
-            traj_step.observation, tokenizer, groups=["prompt", "grid_state"]
-        )
-        step_dic["grid_state_n_tokens"] = len(step_dic["grid_state_tokens"])
-
-        for i, t in enumerate(step_dic["grid_state_tokens"]):
-            if any(sym in t["token"] for sym in grid_symbols):
-                step_dic["grid_state_tokens"][i]["token_groups"] += ["grid_tile"]
-
-        step_dic["prompt_suffix_tokens"] = prompt["prompt_suffix_tokens"]
-        step_dic["prompt_suffix_n_tokens"] = len(step_dic["prompt_suffix_tokens"])
-        step_dic["agent_action"] = traj_step.metadata["action"]
-        if "coin_collected" in traj_step.metadata:
-            step_dic["coin_collected"] = traj_step.metadata["coin_collected"]
-
-        out_tokens = [t["token"] for t in traj_step.metadata["logprobs"]]
-        step_dic["output_text"] = tokenizer.convert_tokens_to_string(out_tokens)
-        step_dic["output_tokens"] = to_dic_list(
-            step_dic["output_text"], tokenizer, groups=["output"]
-        )
-        step_dic["output_n_tokens"] = len(step_dic["output_tokens"])
-        step_dic["output_tokens"] = annotate_output_tokens(model_name, step_dic["output_tokens"])
-
-        api_logprobs = traj_step.metadata["logprobs"]
-        for i, t in enumerate(step_dic["output_tokens"]):
-            if i >= len(api_logprobs):
-                break
-            if "top_logprobs" not in api_logprobs[i] or "template" in t["token_groups"]:
-                continue
-            curr_probs = {}
-            for logprob_dic in api_logprobs[i]["top_logprobs"]:
-                curr_probs[logprob_dic["token"]] = np.round(np.exp(logprob_dic["logprob"]), 4)
-            step_dic["output_tokens"][i]["probabilities"] = curr_probs
-
-        steps.append(step_dic)
-
-    out = {
-        "grid_params": grid_params,
-        "model_params": model_params,
-        "prompt": prompt,
-        "steps": steps,
-    }
-    with open(output_path, "w") as f:
-        json.dump(out, f, cls=CompactJSONEncoder, ensure_ascii=False, indent=4)
-
-
-def get_trajectories_coin_env(
-    grid_sizes: list[int] = [11],
-    grid_complexities: list[float] = [0.8],
-    target_dead_ends: int | None = None,
-    place_at_dead_ends: bool = False,
-    coin_placement: Literal["random", "dead_end"] | None = "random",
-    max_attempts: int = 1000,
-    num_trajectories_per_grid: int = 5,
-    num_grids_per_config: int = 1,
-    max_steps_per_trajectory: int = 50,
-    max_tokens: int = 10000,
-    temperature: float = 0.7,
-    top_p: float = 0.95,
-    top_logprobs: int = 5,
-    seed: int = 42,
-    reasoning_efforts: list[Literal["low", "medium", "high"]] = ["low"],
-    model_names: list[str] = ["together_ai/openai/gpt-oss-20b"],
-    observation_placeholders: list[str] = ["grid_state"],
-    output_dir: str = ".",
-    verbose: bool = False,
-    enable_dynamic_max_steps: bool = False,
-    max_workers: int | None = None,
-    max_workers_per_grid: int | None = None,
-    enable_rate_limit: bool = False,
-    rate_limit: int = 1000,
-    rate_limit_period: float = 300.0,
-    hf_repo_id: str | None = None,
-    hf_path_prefix: str = "",
-    hf_token: str | None = None,
-    template_name: str = "grid_full_observability_hidden_goals.j2",
-):
-    """Generate multiple trajectories on coin environments for each size × complexity × model combination.
-
-    Like get_trajectories_multiple_per_grid but uses CoinNavigationEnv and supports
-    dead-end constraints and coin placement. For each (grid_size, grid_complexity,
-    model_name) combination, generates num_grids_per_config unique grid layouts and
-    runs num_trajectories_per_grid trajectories on each layout in parallel.
-
-    Each trajectory uses a deepcopy of the master environment, so the coin and grid
-    layout are identical across trajectories on the same grid.
-
-    Args:
-        grid_sizes: List of grid sizes to use.
-        grid_complexities: List of grid complexity levels.
-        target_dead_ends: Exact dead-end count required. If None, any environment is accepted.
-        place_at_dead_ends: If True, place agent start and goal at dead-end cells.
-        coin_placement: Where to place the coin. "random" = any open cell; "dead_end" = a
-            dead-end cell (falls back to random if none available); None = no coin.
-        max_attempts: Maximum generation attempts when target_dead_ends is set.
-        num_trajectories_per_grid: Number of trajectories to generate per grid layout.
-        num_grids_per_config: Number of distinct grid layouts per (size, complexity, model).
-        max_steps_per_trajectory: Maximum steps per trajectory.
-        max_tokens: Maximum tokens per model generation step.
-        temperature: Sampling temperature.
-        top_p: Nucleus sampling parameter.
-        top_logprobs: Number of top log probabilities to return.
-        seed: Base random seed; each grid uses seed + grid_id.
-        reasoning_efforts: List of reasoning effort levels to run on each grid. Each
-            level produces num_trajectories_per_grid trajectories.
-        model_names: List of model names in "provider/model_id" format.
-        observation_placeholders: Placeholder names in the prompt template.
-        output_dir: Directory to save output JSON files.
-        verbose: If True, print detailed logging.
-        enable_dynamic_max_steps: If True, override max_steps_per_trajectory with
-            1.5× the A* optimal path length.
-        max_workers: Max parallel workers for grid-level parallelism. Defaults to
-            min(32, total_grid_tasks).
-        max_workers_per_grid: Max parallel workers within each grid. Defaults to
-            num_trajectories_per_grid.
-        enable_rate_limit: If True, enforce API rate limiting.
-        rate_limit: Max requests per rate_limit_period.
-        rate_limit_period: Rate limit time window in seconds.
-        hf_repo_id: Hugging Face repo to upload results to. None = no upload.
-        hf_path_prefix: Path prefix within the HF repo.
-        hf_token: Hugging Face API token.
-
-    Returns:
-        list[str] | None: List of HF URLs if uploaded, otherwise None.
-        Results are saved to individual JSON files in output_dir with format:
-        {model_sanitized}_size{grid_size}_comp{grid_complexity}_grid{grid_id}_coin_{effort}_traj{traj_id}.json
-        Grid layouts are saved as:
-        {model_sanitized}_size{grid_size}_comp{grid_complexity}_grid{grid_id}_coin_layout.json
-    """
-    output_dir = str(_resolve_output(output_dir))
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-    grid_configs = list(
-        product(
-            grid_sizes,
-            grid_complexities,
-            model_names,
-            range(num_grids_per_config),
-        )
-    )
-
-    total_grid_tasks = len(grid_configs)
-    total_trajectories = total_grid_tasks * num_trajectories_per_grid * len(reasoning_efforts)
-
-    logger.info(
-        f"Generating {total_trajectories} coin-env trajectories across {len(grid_sizes)} "
-        f"grid sizes, {len(grid_complexities)} complexities, {len(model_names)} models, "
-        f"with {num_grids_per_config} grids each, {num_trajectories_per_grid} trajectories per grid, "
-        f"and reasoning efforts {reasoning_efforts}."
-    )
-
-    rate_limiter: RateLimiter | None = None
-    if enable_rate_limit:
-        rate_limiter = RateLimiter(rate_limit=rate_limit, period=rate_limit_period)
-
-    def _build_coin_env(
-        grid_size: int, grid_complexity: float, rng_seed: int
-    ) -> tuple[FullObservabilityTextWrapper, list | None, int]:
-        """Build and reset a coin environment, retrying until dead-end constraint is met.
-
-        Returns (wrapped_env, coin_pos, actual_dead_ends). The env is already reset
-        and has the coin placed — do not call reset() again or the grid will regenerate.
-        """
-        np.random.seed(rng_seed)
-        env_class = CoinNavigationEnv if coin_placement is not None else Simple2DNavigationEnv
-        base_env_unwrapped = None
-
-        for _ in range(max_attempts):
-            candidate = env_class(
-                size=grid_size,
-                complexity=grid_complexity,
-                place_at_dead_ends=place_at_dead_ends,
-            )
-            candidate.reset()
-            if target_dead_ends is None or len(get_all_dead_ends(candidate)) == target_dead_ends:
-                base_env_unwrapped = candidate
-                break
-            candidate.close()
-
-        if base_env_unwrapped is None:
-            raise RuntimeError(
-                f"Could not generate environment with {target_dead_ends} dead ends "
-                f"after {max_attempts} attempts (size={grid_size}, complexity={grid_complexity})."
-            )
-
-        actual_dead_ends = len(get_all_dead_ends(base_env_unwrapped))
-
-        coin_pos = None
-        if coin_placement is not None:
-            excluded = {tuple(base_env_unwrapped.agent_pos), tuple(base_env_unwrapped.goal_pos)}
-            if coin_placement == "dead_end":
-                candidates_list = [
-                    (x, y) for (x, y) in get_all_dead_ends(base_env_unwrapped)
-                    if (x, y) not in excluded
-                ]
-                if not candidates_list:
-                    logger.warning("No valid dead end for coin placement; falling back to random.")
-                    candidates_list = [
-                        (x, y)
-                        for x in range(1, base_env_unwrapped.width - 1)
-                        for y in range(1, base_env_unwrapped.height - 1)
-                        if base_env_unwrapped.grid.get(x, y) is None and (x, y) not in excluded
-                    ]
-            else:
-                candidates_list = [
-                    (x, y)
-                    for x in range(1, base_env_unwrapped.width - 1)
-                    for y in range(1, base_env_unwrapped.height - 1)
-                    if base_env_unwrapped.grid.get(x, y) is None and (x, y) not in excluded
-                ]
-            if candidates_list:
-                coin_pos = random.choice(candidates_list)
-                base_env_unwrapped.put_obj(Ball("yellow"), *coin_pos)
-
-        return FullObservabilityTextWrapper(base_env_unwrapped), coin_pos, actual_dead_ends
-
-    def _save_coin_grid_layout(
-        env: FullObservabilityTextWrapper,
-        grid_size: int,
-        grid_complexity: float,
-        grid_id: int,
-        grid_seed: int,
-        model_sanitized: str,
-        coin_pos: list | None,
-        actual_dead_ends: int,
-    ) -> str:
-        unwrapped = env.unwrapped
-
-        grid_list = []
-        for j in range(unwrapped.height):
-            row = []
-            for i in range(unwrapped.width):
-                cell = unwrapped.grid.get(i, j)
-                if (i, j) == tuple(unwrapped.agent_pos):
-                    row.append("A")
-                elif cell is None:
-                    row.append("_")
-                elif cell.type == "wall":
-                    row.append("#")
-                elif cell.type == "goal":
-                    row.append("G")
-                elif cell.type == "ball":
-                    row.append("C")
-                else:
-                    row.append("?")
-            grid_list.append(row)
-
-        agent_pos = unwrapped.agent_pos
-        agent_start_pos = agent_pos.tolist() if hasattr(agent_pos, "tolist") else list(agent_pos)
-        if hasattr(unwrapped, "_initial_agent_pos") and unwrapped._initial_agent_pos is not None:
-            p = unwrapped._initial_agent_pos
-            agent_start_pos = p.tolist() if hasattr(p, "tolist") else list(p)
-
-        agent_start_dir = getattr(unwrapped, "_initial_agent_dir", unwrapped.agent_dir)
-
-        grid_data = {
-            "grid_id": grid_id,
-            "grid_seed": grid_seed,
-            "grid_size": grid_size,
-            "grid_complexity": grid_complexity,
-            "grid_width": unwrapped.width,
-            "grid_height": unwrapped.height,
-            "target_dead_ends": target_dead_ends,
-            "actual_dead_ends": actual_dead_ends,
-            "place_at_dead_ends": place_at_dead_ends,
-            "coin_placement": coin_placement,
-            "coin_pos": list(coin_pos) if coin_pos is not None else None,
-            "agent_start_pos": agent_start_pos,
-            "agent_start_dir": agent_start_dir,
-            "goal_pos": list(unwrapped.goal_pos),
-            "grid_layout": grid_list,
-            "grid_text": env._render(),
-            "legend": env.grid_cells,
-        }
-
-        grid_filename = (
-            f"{model_sanitized}_size{grid_size}_comp{grid_complexity}"
-            f"_grid{grid_id}_coin_layout.json"
-        )
-        grid_path = str(Path(output_dir) / grid_filename)
-        with open(grid_path, "w") as f:
-            json.dump(grid_data, f, indent=2)
-
-        if verbose:
-            logger.info(f"Saved coin grid layout to {grid_path}")
-
-        return grid_path
-
-    def _generate_trajectories_for_grid(config: tuple) -> dict:
-        grid_size, grid_complexity, model_name, grid_id = config
-        grid_seed = seed + grid_id
-        model_sanitized = model_name.replace("/", "_").replace(".", "_")
-
-        master_env, coin_pos, actual_dead_ends = _build_coin_env(grid_size, grid_complexity, grid_seed)
-
-        grid_path = _save_coin_grid_layout(
-            env=master_env,
-            grid_size=grid_size,
-            grid_complexity=grid_complexity,
-            grid_id=grid_id,
-            grid_seed=grid_seed,
-            model_sanitized=model_sanitized,
-            coin_pos=coin_pos,
-            actual_dead_ends=actual_dead_ends,
-        )
-
-        def _generate_single_trajectory(traj_id: int, effort: str) -> dict:
-            if rate_limiter is not None:
-                rate_limiter.acquire()
-
-            traj_seed = grid_seed + traj_id * 1000 + hash(effort) % 10000
-            env_copy = copy.deepcopy(master_env)
-
-            output_filename = (
-                f"{model_sanitized}_size{grid_size}_comp{grid_complexity}"
-                f"_grid{grid_id}_coin_{effort}_traj{traj_id}.json"
-            )
-            output_path = str(Path(output_dir) / output_filename)
-
-            if verbose:
-                logger.info(
-                    f"Starting coin trajectory: model={model_name}, size={grid_size}, "
-                    f"complexity={grid_complexity}, grid={grid_id}, effort={effort}, traj={traj_id}"
-                )
-
-            try:
-                get_trajectory(
-                    grid_size=grid_size,
-                    grid_complexity=grid_complexity,
-                    max_steps_per_trajectory=max_steps_per_trajectory,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_logprobs=top_logprobs,
-                    seed=traj_seed,
-                    reasoning_effort=effort,
-                    model_name=model_name,
-                    observation_placeholders=observation_placeholders,
-                    output_path=output_path,
-                    verbose=verbose,
-                    enable_dynamic_max_steps=enable_dynamic_max_steps,
-                    env=env_copy,
-                    use_safe_reset=True,
-                    template_name=template_name,
-                )
-                return {"status": "success", "output_path": output_path, "config": config, "traj_id": traj_id, "effort": effort}
-            except Exception as e:
-                logger.error(f"Failed coin trajectory grid={grid_id}, effort={effort}, traj={traj_id}: {e}")
-                return {"status": "error", "error": str(e), "config": config, "traj_id": traj_id, "effort": effort}
-
-        inner_workers = (
-            max_workers_per_grid if max_workers_per_grid is not None
-            else num_trajectories_per_grid * len(reasoning_efforts)
-        )
-        trajectory_results = []
-
-        with ThreadPoolExecutor(max_workers=inner_workers) as inner_executor:
-            futures = {
-                inner_executor.submit(_generate_single_trajectory, traj_id, effort): (traj_id, effort)
-                for effort in reasoning_efforts
-                for traj_id in range(num_trajectories_per_grid)
-            }
-            for future in as_completed(futures):
-                traj_id, effort = futures[future]
-                try:
-                    trajectory_results.append(future.result())
-                except Exception as e:
-                    logger.error(f"Exception for grid {grid_id}, effort {effort}, traj {traj_id}: {e}")
-                    trajectory_results.append(
-                        {"status": "error", "error": str(e), "config": config, "traj_id": traj_id, "effort": effort}
-                    )
-
-        return {"trajectory_results": trajectory_results, "grid_paths": [grid_path]}
-
-    if max_workers is None:
-        max_workers = min(32, total_grid_tasks)
-
-    if enable_rate_limit and rate_limiter is not None:
-        sustainable_workers = min(max_workers, int(rate_limiter.tokens_per_second * 2))
-        if sustainable_workers < max_workers:
-            logger.info(
-                f"Adjusting max_workers from {max_workers} to {sustainable_workers} "
-                f"based on rate limit ({rate_limiter.tokens_per_second:.2f} req/sec)"
-            )
-            max_workers = sustainable_workers
-
-    all_trajectory_results = []
-    all_grid_paths = []
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_generate_trajectories_for_grid, config): config
-            for config in grid_configs
-        }
-        for future in tqdm(
-            as_completed(futures),
-            total=total_grid_tasks,
-            desc="Processing coin grids",
-            unit="grid",
-        ):
-            config = futures[future]
-            try:
-                result = future.result()
-                all_trajectory_results.extend(result["trajectory_results"])
-                all_grid_paths.extend(result["grid_paths"])
-                failures = [r for r in result["trajectory_results"] if r["status"] != "success"]
-                for failure in failures:
-                    tqdm.write(
-                        f"Failed for grid {config}, traj {failure['traj_id']}: "
-                        f"{failure.get('error', 'Unknown error')}"
-                    )
-            except Exception as e:
-                tqdm.write(f"Exception for grid {config}: {e}")
-                for traj_id in range(num_trajectories_per_grid):
-                    all_trajectory_results.append(
-                        {"status": "error", "error": str(e), "config": config, "traj_id": traj_id}
-                    )
-
-    success_count = sum(1 for r in all_trajectory_results if r["status"] == "success")
-    logger.info(f"Completed {success_count}/{total_trajectories} coin-env trajectories successfully.")
-    logger.info(f"Saved {len(all_grid_paths)} grid layout files.")
-
-    if hf_repo_id is not None and (success_count > 0 or all_grid_paths):
-        all_paths_to_upload = [
-            r["output_path"] for r in all_trajectory_results if r["status"] == "success"
-        ]
-        all_paths_to_upload.extend(all_grid_paths)
-        if all_paths_to_upload:
-            return upload_files_to_huggingface(
-                file_paths=all_paths_to_upload,
-                repo_id=hf_repo_id,
-                path_prefix=hf_path_prefix,
-                hf_token=hf_token,
-            )
-    return None
-
 
 def get_trajectories_multiple_per_grid(
     grid_sizes: list[int] = [5],
@@ -1605,6 +960,719 @@ def get_trajectories_multiple_per_grid(
         # Add grid layout files
         all_paths_to_upload.extend(all_grid_paths)
 
+        if all_paths_to_upload:
+            return upload_files_to_huggingface(
+                file_paths=all_paths_to_upload,
+                repo_id=hf_repo_id,
+                path_prefix=hf_path_prefix,
+                hf_token=hf_token,
+            )
+    return None
+
+
+def get_single_trajectory_coin_env(
+    grid_size: int = 11,
+    grid_complexity: float = 0.8,
+    target_dead_ends: int | None = None,
+    place_at_dead_ends: bool = False,
+    coin_placement: Literal["random", "dead_end"] | None = None,
+    max_attempts: int = 1000,
+    min_manhattan_distance: int = 3,
+    max_steps_per_trajectory: int = 50,
+    max_tokens: int = 10000,
+    temperature: float = 0.7,
+    top_p: float = 0.95,
+    top_logprobs: int = 5,
+    seed: int = 42,
+    reasoning_effort: Literal["low", "medium", "high"] = "low",
+    model_name: str = "together_ai/openai/gpt-oss-20b",
+    template_name: str = "grid_full_observability_hidden_goals.j2",
+    observation_placeholders: list[str] = ["grid_state"],
+    output_path: str = "get_trajectory_deadend_example_output.json",
+    verbose: bool = False,
+    enable_dynamic_max_steps: bool = False,
+):
+    """Generate an agent trajectory in a dead-end constrained navigation environment and save detailed results to JSON.
+
+    Creates a Simple2DNavigationEnv with an optional dead-end count constraint and optional coin
+    placement. Environments are repeatedly generated until one matching the target_dead_ends count
+    is found (up to max_attempts). Follows the same output format as get_trajectory.
+
+    Args:
+        grid_size: Size of the square grid environment.
+        grid_complexity: Complexity level of the grid (0.0 = open room, 1.0 = perfect maze).
+        target_dead_ends: Exact number of dead ends required in the generated maze. If None,
+            the first generated environment is used without constraint.
+        place_at_dead_ends: If True, place the agent start and goal at dead-end cells.
+        coin_placement: Where to place the coin. "random" places it in any open cell;
+            "dead_end" places it at a dead-end cell (falls back to random if none available);
+            None places no coin.
+        max_attempts: Maximum number of generation attempts when target_dead_ends is set.
+        max_steps_per_trajectory: Maximum number of steps to generate in the trajectory.
+        max_tokens: Maximum tokens for model generation per step.
+        temperature: Sampling temperature for the model (higher = more random).
+        top_p: Nucleus sampling parameter (cumulative probability threshold).
+        top_logprobs: Number of top log probabilities to return for each token.
+        seed: Random seed for reproducibility.
+        reasoning_effort: Reasoning effort level for the model ("low", "medium", or "high").
+        model_name: Name of the model in format "provider/model_id".
+        template_name: Name of the Jinja2 template file to use for prompts.
+        observation_placeholders: List of placeholder names in the prompt template.
+        output_path: Path to save the output JSON file.
+        verbose: If True, print detailed logging during trajectory generation.
+        enable_dynamic_max_steps: If True, override max_steps_per_trajectory with a dynamic
+            value based on 1.5x the A* optimal path length.
+
+    Returns:
+        None. Results are saved to the specified output_path.
+
+    The output JSON structure follows the format expected by the trace viewer:
+        - grid_params: Grid configuration including dead-end count, coin placement, start/goal
+            positions, A* distance, and legend.
+        - model_params: Model configuration (name, provider, sampling parameters, seed).
+        - prompt: Prompt template with token-level annotations.
+        - steps: List of trajectory steps with grid state, action, output tokens, and probabilities.
+    """
+    output_path = str(_resolve_output(output_path))
+
+    # Use CoinNavigationEnv only when a coin is requested; Simple2DNavigationEnv otherwise
+    if coin_placement is not None:
+        env_class = CoinNavigationEnv
+    else:
+        env_class = Simple2DNavigationEnv
+
+    base_env_unwrapped = None
+    coin_pos = None
+    for _ in range(max_attempts):
+        candidate = env_class(
+            size=grid_size,
+            complexity=grid_complexity,
+            place_at_dead_ends=place_at_dead_ends,
+        )
+        candidate.reset()
+
+        # Reject grids that don't meet the dead-end count requirement
+        if target_dead_ends is not None and len(get_all_dead_ends(candidate)) != target_dead_ends:
+            candidate.close()
+            continue
+
+        start = tuple(candidate.agent_pos)
+        goal = tuple(candidate.goal_pos)
+
+        # Reject grids where start and goal are too close together
+        if manhattan_distance(start, goal) < min_manhattan_distance:
+            candidate.close()
+            continue
+
+        # Find valid coin positions satisfying distance constraints
+        resolved_coin_pos = None
+        if coin_placement is not None:
+            excluded = {start, goal}
+            effective_placement = coin_placement
+
+            # Prefer dead-end cells; fall back to random if none available
+            if effective_placement == "dead_end":
+                raw = [
+                    (x, y) for (x, y) in get_all_dead_ends(candidate)
+                    if (x, y) not in excluded
+                ]
+                if not raw:
+                    logger.warning("No valid dead end for coin placement; falling back to random.")
+                    effective_placement = "random"
+            if effective_placement == "random":
+                raw = [
+                    (x, y)
+                    for x in range(1, candidate.width - 1)
+                    for y in range(1, candidate.height - 1)
+                    if candidate.grid.get(x, y) is None and (x, y) not in excluded
+                ]
+
+            # Filter to positions that are far enough from both start and goal
+            valid = [
+                p for p in raw
+                if manhattan_distance(start, p) >= min_manhattan_distance
+                and manhattan_distance(goal, p) >= min_manhattan_distance
+            ]
+
+            # Reject grids with no valid coin position
+            if not valid:
+                candidate.close()
+                continue
+
+            resolved_coin_pos = random.choice(valid)
+            candidate.put_obj(Ball("yellow"), *resolved_coin_pos)
+
+        base_env_unwrapped = candidate
+        coin_pos = resolved_coin_pos
+        break
+
+    if base_env_unwrapped is None:
+        raise RuntimeError(
+            f"Could not generate an environment satisfying all constraints after {max_attempts} "
+            f"attempts (size={grid_size}, complexity={grid_complexity}, "
+            f"target_dead_ends={target_dead_ends}, min_manhattan_distance={min_manhattan_distance})."
+        )
+
+    actual_dead_ends = len(get_all_dead_ends(base_env_unwrapped))
+
+    base_env = FullObservabilityTextWrapper(base_env_unwrapped)
+
+    # Load template and create agent
+    template_path = Path(__file__).parent.parent.parent / "templates" / template_name
+    agent = LLMAgent(model_name=model_name, template_path=template_path)
+    model_id = "/".join(model_name.split("/")[1:])
+    provider = model_name.split("/")[0]
+    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
+
+    traj = generate_trajectory(
+        env=base_env,
+        agent=agent,
+        max_steps_per_trajectory=max_steps_per_trajectory,
+        generation_kwargs={
+            "top_logprobs": top_logprobs,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "reasoning_effort": reasoning_effort,
+            "seed": seed,
+        },
+        verbose=verbose,
+        enable_dynamic_max_steps=enable_dynamic_max_steps,
+        skip_reset=True,
+    )
+
+    grid_params = {}
+    grid_params["grid_width"] = base_env_unwrapped.width
+    grid_params["grid_height"] = base_env_unwrapped.height
+    grid_params["grid_complexity"] = grid_complexity
+    grid_params["target_dead_ends"] = target_dead_ends
+    grid_params["actual_dead_ends"] = actual_dead_ends
+    grid_params["place_at_dead_ends"] = place_at_dead_ends
+    grid_params["coin_placement"] = coin_placement
+    grid_params["coin_pos"] = list(coin_pos) if coin_pos is not None else None
+    grid_params["fully_observable"] = True
+    grid_params["astar_distance"] = traj.traj_metadata["astar_distance"]
+    grid_params["agent_start_coordinates"] = traj.traj_metadata["agent_start_coordinates"]
+    grid_params["goal_coordinates"] = traj.traj_metadata["goal_coordinates"]
+    grid_params["legend"] = base_env.grid_cells
+
+    grid_symbols = [cell["symbol"] for cell in base_env.grid_cells.values()]
+
+    model_params = {}
+    model_params["model_id"] = model_id
+    model_params["provider"] = provider
+    model_params["interface"] = "litellm"
+    model_params["template_name"] = template_name
+    model_params["n_interactions_in_context"] = 0
+    model_params["max_tokens"] = max_tokens
+    model_params["max_steps_per_trajectory"] = max_steps_per_trajectory
+    model_params["temperature"] = temperature
+    model_params["reasoning_effort"] = reasoning_effort
+    model_params["top_p"] = top_p
+    model_params["top_logprobs"] = top_logprobs
+    model_params["seed"] = seed
+
+    prompt = {}
+    render_kwargs = {"grid_state": "{{grid_state}}"}
+    template = agent._template.render(**render_kwargs)
+    formatted_template: str = tokenizer.apply_chat_template(
+        [{"role": "user", "content": template}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    template_tokens = to_dic_list(formatted_template, tokenizer)
+
+    observation_placeholder = "{{" + observation_placeholders[0] + "}}"
+    prefix, suffix = formatted_template.split(observation_placeholder)
+    raw_prefix, raw_suffix = template.split(observation_placeholder)
+    prompt["prompt_template"] = formatted_template
+    prompt["prompt_template_n_tokens"] = len(template_tokens)
+    prompt["prompt_prefix_tokens"] = to_dic_list(prefix, tokenizer)
+    raw_prefix_tokens = to_dic_list(raw_prefix, tokenizer)
+    start_raw_prefix_idx = len(prompt["prompt_prefix_tokens"]) - len(raw_prefix_tokens)
+    for i in range(start_raw_prefix_idx):
+        prompt["prompt_prefix_tokens"][i]["token_groups"] += ["template"]
+    prompt["prompt_prefix_n_tokens"] = len(prompt["prompt_prefix_tokens"])
+    prompt["prompt_placeholder_tokens"] = to_dic_list(
+        observation_placeholder, tokenizer, groups=["prompt", "placeholder"]
+    )
+    prompt["prompt_placeholder_n_tokens"] = len(prompt["prompt_placeholder_tokens"])
+    prompt["prompt_suffix_tokens"] = to_dic_list(suffix, tokenizer)
+    raw_suffix_tokens = to_dic_list(raw_suffix, tokenizer)
+    start_raw_suffix_idx = len(prompt["prompt_suffix_tokens"]) - len(raw_suffix_tokens) + 1
+    for i in range(
+        len(prompt["prompt_suffix_tokens"]) - start_raw_suffix_idx,
+        len(prompt["prompt_suffix_tokens"]) - 1,
+    ):
+        prompt["prompt_suffix_tokens"][i]["token_groups"] += ["template"]
+    prompt["prompt_suffix_n_tokens"] = len(prompt["prompt_suffix_tokens"])
+
+    steps = []
+    for step_id, traj_step in enumerate(traj.steps):
+        step_dic = {}
+        step_dic["step_id"] = step_id
+        step_dic["grid_state"] = traj_step.observation.split("\n")
+        step_dic["grid_state_tokens"] = to_dic_list(
+            traj_step.observation, tokenizer, groups=["prompt", "grid_state"]
+        )
+        step_dic["grid_state_n_tokens"] = len(step_dic["grid_state_tokens"])
+
+        for i, t in enumerate(step_dic["grid_state_tokens"]):
+            if any(sym in t["token"] for sym in grid_symbols):
+                step_dic["grid_state_tokens"][i]["token_groups"] += ["grid_tile"]
+
+        step_dic["prompt_suffix_tokens"] = prompt["prompt_suffix_tokens"]
+        step_dic["prompt_suffix_n_tokens"] = len(step_dic["prompt_suffix_tokens"])
+        step_dic["agent_action"] = traj_step.metadata["action"]
+        if "coin_collected" in traj_step.metadata:
+            step_dic["coin_collected"] = traj_step.metadata["coin_collected"]
+
+        out_tokens = [t["token"] for t in traj_step.metadata["logprobs"]]
+        step_dic["output_text"] = tokenizer.convert_tokens_to_string(out_tokens)
+        step_dic["output_tokens"] = to_dic_list(
+            step_dic["output_text"], tokenizer, groups=["output"]
+        )
+        step_dic["output_n_tokens"] = len(step_dic["output_tokens"])
+        step_dic["output_tokens"] = annotate_output_tokens(model_name, step_dic["output_tokens"])
+
+        api_logprobs = traj_step.metadata["logprobs"]
+        for i, t in enumerate(step_dic["output_tokens"]):
+            if i >= len(api_logprobs):
+                break
+            if "top_logprobs" not in api_logprobs[i] or "template" in t["token_groups"]:
+                continue
+            curr_probs = {}
+            for logprob_dic in api_logprobs[i]["top_logprobs"]:
+                curr_probs[logprob_dic["token"]] = np.round(np.exp(logprob_dic["logprob"]), 4)
+            step_dic["output_tokens"][i]["probabilities"] = curr_probs
+
+        steps.append(step_dic)
+
+    out = {
+        "grid_params": grid_params,
+        "model_params": model_params,
+        "prompt": prompt,
+        "steps": steps,
+    }
+    with open(output_path, "w") as f:
+        json.dump(out, f, cls=CompactJSONEncoder, ensure_ascii=False, indent=4)
+
+
+def get_multiple_trajectories_coin_env(
+    grid_sizes: list[int] = [11],
+    grid_complexities: list[float] = [0.8],
+    target_dead_ends: int | None = None,
+    place_at_dead_ends: bool = False,
+    coin_placement: Literal["random", "dead_end"] | None = "random",
+    min_manhattan_distance: int = 3,
+    max_attempts: int = 1000,
+    num_trajectories_per_grid: int = 5,
+    num_grids_per_config: int = 1,
+    max_steps_per_trajectory: int = 50,
+    max_tokens: int = 10000,
+    temperature: float = 0.7,
+    top_p: float = 0.95,
+    top_logprobs: int = 5,
+    seed: int = 42,
+    reasoning_efforts: list[Literal["low", "medium", "high"]] = ["low"],
+    model_names: list[str] = ["together_ai/openai/gpt-oss-20b"],
+    observation_placeholders: list[str] = ["grid_state"],
+    output_dir: str = ".",
+    verbose: bool = False,
+    enable_dynamic_max_steps: bool = False,
+    max_workers: int | None = None,
+    max_workers_per_grid: int | None = None,
+    enable_rate_limit: bool = False,
+    rate_limit: int = 1000,
+    rate_limit_period: float = 300.0,
+    hf_repo_id: str | None = None,
+    hf_path_prefix: str = "",
+    hf_token: str | None = None,
+    template_name: str = "grid_full_observability_hidden_goals.j2",
+):
+    """Generate multiple trajectories on coin environments for each size × complexity × model combination.
+
+    Like get_trajectories_multiple_per_grid but uses CoinNavigationEnv and supports
+    dead-end constraints and coin placement. For each (grid_size, grid_complexity,
+    model_name) combination, generates num_grids_per_config unique grid layouts and
+    runs num_trajectories_per_grid trajectories on each layout in parallel.
+
+    Each trajectory uses a deepcopy of the master environment, so the coin and grid
+    layout are identical across trajectories on the same grid.
+
+    Args:
+        grid_sizes: List of grid sizes to use.
+        grid_complexities: List of grid complexity levels.
+        target_dead_ends: Exact dead-end count required. If None, any environment is accepted.
+        place_at_dead_ends: If True, place agent start and goal at dead-end cells.
+        coin_placement: Where to place the coin. "random" = any open cell; "dead_end" = a
+            dead-end cell (falls back to random if none available); None = no coin.
+        min_manhattan_distance: Minimum pairwise Manhattan distance required between agent
+            start, coin, and goal. Grids that don't satisfy this are rejected and retried.
+        max_attempts: Maximum generation attempts when target_dead_ends is set.
+        num_trajectories_per_grid: Number of trajectories to generate per grid layout.
+        num_grids_per_config: Number of distinct grid layouts per (size, complexity, model).
+        max_steps_per_trajectory: Maximum steps per trajectory.
+        max_tokens: Maximum tokens per model generation step.
+        temperature: Sampling temperature.
+        top_p: Nucleus sampling parameter.
+        top_logprobs: Number of top log probabilities to return.
+        seed: Base random seed; each grid uses seed + grid_id.
+        reasoning_efforts: List of reasoning effort levels to run on each grid. Each
+            level produces num_trajectories_per_grid trajectories.
+        model_names: List of model names in "provider/model_id" format.
+        observation_placeholders: Placeholder names in the prompt template.
+        output_dir: Directory to save output JSON files.
+        verbose: If True, print detailed logging.
+        enable_dynamic_max_steps: If True, override max_steps_per_trajectory with
+            1.5× the A* optimal path length.
+        max_workers: Max parallel workers for grid-level parallelism. Defaults to
+            min(32, total_grid_tasks).
+        max_workers_per_grid: Max parallel workers within each grid. Defaults to
+            num_trajectories_per_grid.
+        enable_rate_limit: If True, enforce API rate limiting.
+        rate_limit: Max requests per rate_limit_period.
+        rate_limit_period: Rate limit time window in seconds.
+        hf_repo_id: Hugging Face repo to upload results to. None = no upload.
+        hf_path_prefix: Path prefix within the HF repo.
+        hf_token: Hugging Face API token.
+
+    Returns:
+        list[str] | None: List of HF URLs if uploaded, otherwise None.
+        Results are saved to individual JSON files in output_dir with format:
+        {model_sanitized}_size{grid_size}_comp{grid_complexity}_grid{grid_id}_coin_{effort}_traj{traj_id}.json
+        Grid layouts are saved as:
+        {model_sanitized}_size{grid_size}_comp{grid_complexity}_grid{grid_id}_coin_layout.json
+    """
+    output_dir = str(_resolve_output(output_dir))
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    grid_configs = list(
+        product(
+            grid_sizes,
+            grid_complexities,
+            model_names,
+            range(num_grids_per_config),
+        )
+    )
+
+    total_grid_tasks = len(grid_configs)
+    total_trajectories = total_grid_tasks * num_trajectories_per_grid * len(reasoning_efforts)
+
+    logger.info(
+        f"Generating {total_trajectories} coin-env trajectories across {len(grid_sizes)} "
+        f"grid sizes, {len(grid_complexities)} complexities, {len(model_names)} models, "
+        f"with {num_grids_per_config} grids each, {num_trajectories_per_grid} trajectories per grid, "
+        f"and reasoning efforts {reasoning_efforts}."
+    )
+
+    rate_limiter: RateLimiter | None = None
+    if enable_rate_limit:
+        rate_limiter = RateLimiter(rate_limit=rate_limit, period=rate_limit_period)
+
+    def _build_coin_env(
+        grid_size: int, grid_complexity: float, rng_seed: int
+    ) -> tuple[FullObservabilityTextWrapper, list | None, int]:
+        """Build and reset a coin environment, retrying until all constraints are met.
+
+        Returns (wrapped_env, coin_pos, actual_dead_ends). The env is already reset
+        and has the coin placed — do not call reset() again or the grid will regenerate.
+        """
+        np.random.seed(rng_seed)
+
+        # Use CoinNavigationEnv only when a coin is requested; Simple2DNavigationEnv otherwise
+        if coin_placement is not None:
+            env_class = CoinNavigationEnv
+        else:
+            env_class = Simple2DNavigationEnv
+
+        base_env_unwrapped = None
+        coin_pos = None
+
+        for _ in range(max_attempts):
+            candidate = env_class(
+                size=grid_size,
+                complexity=grid_complexity,
+                place_at_dead_ends=place_at_dead_ends,
+            )
+            candidate.reset()
+
+            # Reject grids that don't meet the dead-end count requirement
+            if target_dead_ends is not None and len(get_all_dead_ends(candidate)) != target_dead_ends:
+                candidate.close()
+                continue
+
+            start = tuple(candidate.agent_pos)
+            goal = tuple(candidate.goal_pos)
+
+            # Reject grids where start and goal are too close together
+            if manhattan_distance(start, goal) < min_manhattan_distance:
+                candidate.close()
+                continue
+
+            # Find valid coin positions satisfying distance constraints
+            resolved_coin_pos = None
+            if coin_placement is not None:
+                excluded = {start, goal}
+                effective_placement = coin_placement
+
+                # Prefer dead-end cells; fall back to random if none available
+                if effective_placement == "dead_end":
+                    raw = [
+                        (x, y) for (x, y) in get_all_dead_ends(candidate)
+                        if (x, y) not in excluded
+                    ]
+                    if not raw:
+                        logger.warning("No valid dead end for coin placement; falling back to random.")
+                        effective_placement = "random"
+                if effective_placement == "random":
+                    raw = [
+                        (x, y)
+                        for x in range(1, candidate.width - 1)
+                        for y in range(1, candidate.height - 1)
+                        if candidate.grid.get(x, y) is None and (x, y) not in excluded
+                    ]
+
+                # Filter to positions that are far enough from both start and goal
+                valid = [
+                    p for p in raw
+                    if manhattan_distance(start, p) >= min_manhattan_distance
+                    and manhattan_distance(goal, p) >= min_manhattan_distance
+                ]
+
+                # Reject grids with no valid coin position
+                if not valid:
+                    candidate.close()
+                    continue
+
+                resolved_coin_pos = random.choice(valid)
+                candidate.put_obj(Ball("yellow"), *resolved_coin_pos)
+
+            base_env_unwrapped = candidate
+            coin_pos = resolved_coin_pos
+            break
+
+        if base_env_unwrapped is None:
+            raise RuntimeError(
+                f"Could not generate an environment satisfying all constraints after {max_attempts} "
+                f"attempts (size={grid_size}, complexity={grid_complexity}, "
+                f"target_dead_ends={target_dead_ends}, min_manhattan_distance={min_manhattan_distance})."
+            )
+
+        actual_dead_ends = len(get_all_dead_ends(base_env_unwrapped))
+        return FullObservabilityTextWrapper(base_env_unwrapped), coin_pos, actual_dead_ends
+
+    def _save_coin_grid_layout(
+        env: FullObservabilityTextWrapper,
+        grid_size: int,
+        grid_complexity: float,
+        grid_id: int,
+        grid_seed: int,
+        model_sanitized: str,
+        coin_pos: list | None,
+        actual_dead_ends: int,
+    ) -> str:
+        unwrapped = env.unwrapped
+
+        grid_list = []
+        for j in range(unwrapped.height):
+            row = []
+            for i in range(unwrapped.width):
+                cell = unwrapped.grid.get(i, j)
+                if (i, j) == tuple(unwrapped.agent_pos):
+                    row.append("A")
+                elif cell is None:
+                    row.append("_")
+                elif cell.type == "wall":
+                    row.append("#")
+                elif cell.type == "goal":
+                    row.append("G")
+                elif cell.type == "ball":
+                    row.append("C")
+                else:
+                    row.append("?")
+            grid_list.append(row)
+
+        agent_pos = unwrapped.agent_pos
+        agent_start_pos = agent_pos.tolist() if hasattr(agent_pos, "tolist") else list(agent_pos)
+        if hasattr(unwrapped, "_initial_agent_pos") and unwrapped._initial_agent_pos is not None:
+            p = unwrapped._initial_agent_pos
+            agent_start_pos = p.tolist() if hasattr(p, "tolist") else list(p)
+
+        agent_start_dir = getattr(unwrapped, "_initial_agent_dir", unwrapped.agent_dir)
+
+        grid_data = {
+            "grid_id": grid_id,
+            "grid_seed": grid_seed,
+            "grid_size": grid_size,
+            "grid_complexity": grid_complexity,
+            "grid_width": unwrapped.width,
+            "grid_height": unwrapped.height,
+            "target_dead_ends": target_dead_ends,
+            "actual_dead_ends": actual_dead_ends,
+            "place_at_dead_ends": place_at_dead_ends,
+            "coin_placement": coin_placement,
+            "coin_pos": list(coin_pos) if coin_pos is not None else None,
+            "agent_start_pos": agent_start_pos,
+            "agent_start_dir": agent_start_dir,
+            "goal_pos": list(unwrapped.goal_pos),
+            "grid_layout": grid_list,
+            "grid_text": env._render(),
+            "legend": env.grid_cells,
+        }
+
+        grid_filename = (
+            f"{model_sanitized}_size{grid_size}_comp{grid_complexity}"
+            f"_grid{grid_id}_coin_layout.json"
+        )
+        grid_path = str(Path(output_dir) / grid_filename)
+        with open(grid_path, "w") as f:
+            json.dump(grid_data, f, indent=2)
+
+        if verbose:
+            logger.info(f"Saved coin grid layout to {grid_path}")
+
+        return grid_path
+
+    def _generate_trajectories_for_grid(config: tuple) -> dict:
+        grid_size, grid_complexity, model_name, grid_id = config
+        grid_seed = seed + grid_id
+        model_sanitized = model_name.replace("/", "_").replace(".", "_")
+
+        master_env, coin_pos, actual_dead_ends = _build_coin_env(grid_size, grid_complexity, grid_seed)
+
+        grid_path = _save_coin_grid_layout(
+            env=master_env,
+            grid_size=grid_size,
+            grid_complexity=grid_complexity,
+            grid_id=grid_id,
+            grid_seed=grid_seed,
+            model_sanitized=model_sanitized,
+            coin_pos=coin_pos,
+            actual_dead_ends=actual_dead_ends,
+        )
+
+        def _generate_single_trajectory(traj_id: int, effort: str) -> dict:
+            if rate_limiter is not None:
+                rate_limiter.acquire()
+
+            traj_seed = grid_seed + traj_id * 1000 + hash(effort) % 10000
+            env_copy = copy.deepcopy(master_env)
+
+            output_filename = (
+                f"{model_sanitized}_size{grid_size}_comp{grid_complexity}"
+                f"_grid{grid_id}_coin_{effort}_traj{traj_id}.json"
+            )
+            output_path = str(Path(output_dir) / output_filename)
+
+            if verbose:
+                logger.info(
+                    f"Starting coin trajectory: model={model_name}, size={grid_size}, "
+                    f"complexity={grid_complexity}, grid={grid_id}, effort={effort}, traj={traj_id}"
+                )
+
+            try:
+                get_trajectory(
+                    grid_size=grid_size,
+                    grid_complexity=grid_complexity,
+                    max_steps_per_trajectory=max_steps_per_trajectory,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_logprobs=top_logprobs,
+                    seed=traj_seed,
+                    reasoning_effort=effort,
+                    model_name=model_name,
+                    observation_placeholders=observation_placeholders,
+                    output_path=output_path,
+                    verbose=verbose,
+                    enable_dynamic_max_steps=enable_dynamic_max_steps,
+                    env=env_copy,
+                    use_safe_reset=True,
+                    template_name=template_name,
+                )
+                return {"status": "success", "output_path": output_path, "config": config, "traj_id": traj_id, "effort": effort}
+            except Exception as e:
+                logger.error(f"Failed coin trajectory grid={grid_id}, effort={effort}, traj={traj_id}: {e}")
+                return {"status": "error", "error": str(e), "config": config, "traj_id": traj_id, "effort": effort}
+
+        inner_workers = (
+            max_workers_per_grid if max_workers_per_grid is not None
+            else num_trajectories_per_grid * len(reasoning_efforts)
+        )
+        trajectory_results = []
+
+        with ThreadPoolExecutor(max_workers=inner_workers) as inner_executor:
+            futures = {
+                inner_executor.submit(_generate_single_trajectory, traj_id, effort): (traj_id, effort)
+                for effort in reasoning_efforts
+                for traj_id in range(num_trajectories_per_grid)
+            }
+            for future in as_completed(futures):
+                traj_id, effort = futures[future]
+                try:
+                    trajectory_results.append(future.result())
+                except Exception as e:
+                    logger.error(f"Exception for grid {grid_id}, effort {effort}, traj {traj_id}: {e}")
+                    trajectory_results.append(
+                        {"status": "error", "error": str(e), "config": config, "traj_id": traj_id, "effort": effort}
+                    )
+
+        return {"trajectory_results": trajectory_results, "grid_paths": [grid_path]}
+
+    if max_workers is None:
+        max_workers = min(32, total_grid_tasks)
+
+    if enable_rate_limit and rate_limiter is not None:
+        sustainable_workers = min(max_workers, int(rate_limiter.tokens_per_second * 2))
+        if sustainable_workers < max_workers:
+            logger.info(
+                f"Adjusting max_workers from {max_workers} to {sustainable_workers} "
+                f"based on rate limit ({rate_limiter.tokens_per_second:.2f} req/sec)"
+            )
+            max_workers = sustainable_workers
+
+    all_trajectory_results = []
+    all_grid_paths = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_generate_trajectories_for_grid, config): config
+            for config in grid_configs
+        }
+        for future in tqdm(
+            as_completed(futures),
+            total=total_grid_tasks,
+            desc="Processing coin grids",
+            unit="grid",
+        ):
+            config = futures[future]
+            try:
+                result = future.result()
+                all_trajectory_results.extend(result["trajectory_results"])
+                all_grid_paths.extend(result["grid_paths"])
+                failures = [r for r in result["trajectory_results"] if r["status"] != "success"]
+                for failure in failures:
+                    tqdm.write(
+                        f"Failed for grid {config}, traj {failure['traj_id']}: "
+                        f"{failure.get('error', 'Unknown error')}"
+                    )
+            except Exception as e:
+                tqdm.write(f"Exception for grid {config}: {e}")
+                for traj_id in range(num_trajectories_per_grid):
+                    all_trajectory_results.append(
+                        {"status": "error", "error": str(e), "config": config, "traj_id": traj_id}
+                    )
+
+    success_count = sum(1 for r in all_trajectory_results if r["status"] == "success")
+    logger.info(f"Completed {success_count}/{total_trajectories} coin-env trajectories successfully.")
+    logger.info(f"Saved {len(all_grid_paths)} grid layout files.")
+
+    if hf_repo_id is not None and (success_count > 0 or all_grid_paths):
+        all_paths_to_upload = [
+            r["output_path"] for r in all_trajectory_results if r["status"] == "success"
+        ]
+        all_paths_to_upload.extend(all_grid_paths)
         if all_paths_to_upload:
             return upload_files_to_huggingface(
                 file_paths=all_paths_to_upload,

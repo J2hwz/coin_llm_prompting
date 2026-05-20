@@ -57,6 +57,10 @@ def get_all_dead_ends(env: MiniGridEnv) -> list[tuple[int, int]]:
     return dead_ends
 
 
+def manhattan_distance(a: tuple[int, int], b: tuple[int, int]) -> int:
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
 def is_internal_point(nx: int, ny: int, env) -> bool:
     """
     Checks if a point (nx, ny) is an internal point of the environment,
