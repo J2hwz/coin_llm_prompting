@@ -40,7 +40,9 @@ Pre-commit hooks run `ruff-format` and `ruff` automatically on commit/push.
 
 ## Git workflow
 
-Commit and push when explicitly asked (usually end of session), or after any significant structural change. Write informative commit messages that describe what changed and why — not just what files were touched. Push after committing: `git push origin main`.
+Commit and push when explicitly asked (usually end of session), or after any significant structural change. Firstly, update the readme file with corresponding changes.  Then, write informative commit messages that describe what changed and why — not just what files were touched. Push after committing: `git push origin main`.
+
+
 
 ## Architecture
 

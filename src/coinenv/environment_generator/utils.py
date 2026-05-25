@@ -61,6 +61,16 @@ def manhattan_distance(a: tuple[int, int], b: tuple[int, int]) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 
+def find_coin_pos(env: MiniGridEnv) -> tuple[int, int] | None:
+    """Scan env.grid for a Ball object and return its (x, y) position, or None."""
+    for x in range(env.width):
+        for y in range(env.height):
+            cell = env.grid.get(x, y)
+            if cell is not None and cell.type == "ball":
+                return (x, y)
+    return None
+
+
 def is_internal_point(nx: int, ny: int, env) -> bool:
     """
     Checks if a point (nx, ny) is an internal point of the environment,

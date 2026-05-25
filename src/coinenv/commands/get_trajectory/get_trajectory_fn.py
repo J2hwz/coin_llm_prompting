@@ -30,7 +30,13 @@ from coinenv.commands.get_trajectory.rate_limiter import (
     RateLimiter,
 )
 from coinenv.environment_generator.custom_minigrid import CoinNavigationEnv, Simple2DNavigationEnv
-from coinenv.environment_generator.utils import get_all_dead_ends, manhattan_distance
+from coinenv.environment_generator.env_transformations import (
+    ReflectEnv,
+    RotateEnv,
+    StartGoalSwap,
+    TransposeEnv,
+)
+from coinenv.environment_generator.utils import clone_env, find_coin_pos, get_all_dead_ends, manhattan_distance
 from coinenv.environment_generator.wrappers.text_obs_wrapper import (
     FullObservabilityTextWrapper,
 )
@@ -1676,6 +1682,366 @@ def get_multiple_trajectories_coin_env(
         if all_paths_to_upload:
             return upload_files_to_huggingface(
                 file_paths=all_paths_to_upload,
+                repo_id=hf_repo_id,
+                path_prefix=hf_path_prefix,
+                hf_token=hf_token,
+            )
+    return None
+
+
+def augment_from_layouts(
+    layout_dir: str,
+    augmentations: list[
+        Literal["start_goal_swap", "rotate", "reflect", "transpose", "random_starts"]
+    ] = ["start_goal_swap", "rotate", "reflect", "transpose"],
+    num_random_starts: int = 3,
+    num_trajectories_per_variant: int = 5,
+    max_steps_per_trajectory: int = 50,
+    max_tokens: int = 10000,
+    temperature: float = 0.7,
+    top_p: float = 0.95,
+    top_logprobs: int = 5,
+    reasoning_efforts: list[Literal["low", "medium", "high"]] = ["low"],
+    model_names: list[str] = ["together_ai/openai/gpt-oss-20b"],
+    observation_placeholders: list[str] = ["grid_state"],
+    output_dir: str = ".",
+    verbose: bool = False,
+    enable_dynamic_max_steps: bool = False,
+    max_workers: int | None = None,
+    enable_rate_limit: bool = False,
+    rate_limit: int = 1000,
+    rate_limit_period: float = 300.0,
+    hf_repo_id: str | None = None,
+    hf_path_prefix: str = "",
+    hf_token: str | None = None,
+    template_name: str = "grid_full_observability_hidden_goals.j2",
+):
+    """Load existing grid layout JSONs and generate trajectories on augmented variants.
+
+    For each ``*_layout.json`` file in ``layout_dir``, reconstructs the environment and
+    applies the requested augmentations:
+
+    - ``"start_goal_swap"``: swap agent start and goal positions (coin stays fixed)
+    - ``"rotate"``: 90° counter-clockwise rotation of the grid
+    - ``"reflect"``: vertical reflection of the grid
+    - ``"transpose"``: transpose of the grid
+    - ``"random_starts"``: sample up to ``num_random_starts`` valid agent start positions
+      on the same grid (same walls, goal, and coin)
+
+    A new layout JSON is saved for each augmented variant, and
+    ``num_trajectories_per_variant × len(reasoning_efforts)`` trajectories are generated
+    per variant per model.
+
+    Args:
+        layout_dir: Directory containing ``*_layout.json`` files to augment.
+        augmentations: Which augmentations to apply. Each produces a separate set of
+            trajectories.
+        num_random_starts: Number of random start positions to sample when
+            ``"random_starts"`` is in augmentations.
+        num_trajectories_per_variant: Number of trajectories per (variant, model, effort).
+        max_steps_per_trajectory: Maximum steps per trajectory.
+        max_tokens: Maximum tokens per model generation step.
+        temperature: Sampling temperature.
+        top_p: Nucleus sampling parameter.
+        top_logprobs: Number of top log probabilities to return.
+        reasoning_efforts: List of reasoning effort levels.
+        model_names: List of model names in ``"provider/model_id"`` format.
+        observation_placeholders: Placeholder names in the prompt template.
+        output_dir: Directory to save output JSON files.
+        verbose: If True, print detailed logging.
+        enable_dynamic_max_steps: If True, override max_steps with 1.5× A* optimal length.
+        max_workers: Max parallel workers. Defaults to min(32, total_variant_tasks).
+        enable_rate_limit: If True, enforce API rate limiting.
+        rate_limit: Max requests per rate_limit_period.
+        rate_limit_period: Rate limit window in seconds.
+        hf_repo_id: Hugging Face repo to upload results to. None = no upload.
+        hf_path_prefix: Path prefix within the HF repo.
+        hf_token: Hugging Face API token.
+        template_name: Jinja2 template filename.
+
+    Returns:
+        list[str] | None: HF upload URLs if hf_repo_id is set, otherwise None.
+        Layout JSONs are saved as: ``{original_stem}_{variant_name}_layout.json``
+        Trajectory JSONs are saved as:
+        ``{original_stem}_{variant_name}_{effort}_traj{traj_id}.json``
+    """
+    from collections import deque
+
+    output_dir_path = Path(str(_resolve_output(output_dir)))
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    output_dir_str = str(output_dir_path)
+
+    layout_dir_path = Path(str(_resolve_output(layout_dir)))
+    layout_files = sorted(layout_dir_path.glob("*_layout.json"))
+    if not layout_files:
+        raise ValueError(f"No *_layout.json files found in {layout_dir_path}")
+
+    _transform_map: dict[str, tuple[str, object]] = {
+        "start_goal_swap": ("StartGoalSwap", StartGoalSwap()),
+        "rotate": ("RotateEnv", RotateEnv()),
+        "reflect": ("ReflectEnv", ReflectEnv()),
+        "transpose": ("TransposeEnv", TransposeEnv()),
+    }
+
+    rate_limiter: RateLimiter | None = None
+    if enable_rate_limit:
+        rate_limiter = RateLimiter(rate_limit=rate_limit, period=rate_limit_period)
+
+    def _reconstruct_env(layout: dict):
+        """Reconstruct a live (unwrapped) env from a saved layout JSON dict."""
+        if layout.get("coin_placement") is not None:
+            env_class = CoinNavigationEnv
+        else:
+            env_class = Simple2DNavigationEnv
+        env = env_class(size=layout["grid_size"], complexity=layout["grid_complexity"])
+        env.reset()
+        # set_env_from_list handles '#', '_', 'A', 'G' but not 'C' (coin)
+        env.set_env_from_list(layout["grid_layout"])
+        # Place coin separately using the saved coin_pos
+        if layout.get("coin_pos") is not None:
+            env.put_obj(Ball("yellow"), *layout["coin_pos"])
+        return env
+
+    def _build_variants(base_env) -> list[tuple[FullObservabilityTextWrapper, str]]:
+        """Apply each requested augmentation and return (wrapped_env, variant_name) pairs."""
+        variants = []
+        for aug in augmentations:
+            if aug in _transform_map:
+                variant_name, transform = _transform_map[aug]
+                aug_env = transform(base_env)
+                variants.append((FullObservabilityTextWrapper(aug_env), variant_name))
+
+            elif aug == "random_starts":
+                # Compute which cells are reachable from the goal via BFS — any cell
+                # reachable from the goal can also reach the goal (undirected grid)
+                goal = tuple(base_env.goal_pos)
+                current_start = tuple(base_env.agent_pos)
+                coin_pos = find_coin_pos(base_env)
+                excluded = {goal, current_start}
+                if coin_pos is not None:
+                    excluded.add(coin_pos)
+
+                reachable: set = {goal}
+                queue: deque = deque([goal])
+                while queue:
+                    x, y = queue.popleft()
+                    for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                        nx, ny = x + dx, y + dy
+                        if (nx, ny) in reachable:
+                            continue
+                        if nx < 0 or ny < 0 or nx >= base_env.width or ny >= base_env.height:
+                            continue
+                        cell = base_env.grid.get(nx, ny)
+                        if cell is None or (hasattr(cell, "can_overlap") and cell.can_overlap()):
+                            reachable.add((nx, ny))
+                            queue.append((nx, ny))
+
+                # Only consider truly empty interior cells not already in use
+                valid_starts = [
+                    (x, y)
+                    for x in range(1, base_env.width - 1)
+                    for y in range(1, base_env.height - 1)
+                    if (x, y) not in excluded
+                    and base_env.grid.get(x, y) is None
+                    and (x, y) in reachable
+                ]
+
+                sampled = random.sample(valid_starts, min(num_random_starts, len(valid_starts)))
+                for pos in sampled:
+                    env_copy = clone_env(base_env)
+                    env_copy.agent_pos = np.array(pos)
+                    env_copy._initial_agent_pos = np.array(pos)
+                    variants.append(
+                        (FullObservabilityTextWrapper(env_copy), f"RandomStart_{pos[0]}_{pos[1]}")
+                    )
+
+            else:
+                logger.warning(f"Unknown augmentation '{aug}' — skipping.")
+
+        return variants
+
+    def _env_to_grid_list(env_unwrapped) -> list[list[str]]:
+        """Render the unwrapped env as a 2D list of cell symbols."""
+        grid_list = []
+        for j in range(env_unwrapped.height):
+            row = []
+            for i in range(env_unwrapped.width):
+                cell = env_unwrapped.grid.get(i, j)
+                if (i, j) == tuple(env_unwrapped.agent_pos):
+                    row.append("A")
+                elif cell is None:
+                    row.append("_")
+                elif cell.type == "wall":
+                    row.append("#")
+                elif cell.type == "goal":
+                    row.append("G")
+                elif cell.type == "ball":
+                    row.append("C")
+                else:
+                    row.append("?")
+            grid_list.append(row)
+        return grid_list
+
+    def _save_variant_layout(
+        wrapped_env: FullObservabilityTextWrapper,
+        original_layout: dict,
+        variant_name: str,
+        original_stem: str,
+    ) -> str:
+        env_u = wrapped_env.unwrapped
+        coin_pos = find_coin_pos(env_u)
+
+        agent_pos = env_u.agent_pos
+        agent_start_pos = agent_pos.tolist() if hasattr(agent_pos, "tolist") else list(agent_pos)
+        if hasattr(env_u, "_initial_agent_pos") and env_u._initial_agent_pos is not None:
+            p = env_u._initial_agent_pos
+            agent_start_pos = p.tolist() if hasattr(p, "tolist") else list(p)
+
+        layout_data = {
+            "original_layout_file": original_layout.get("_source_filename", ""),
+            "variant": variant_name,
+            "grid_id": original_layout["grid_id"],
+            "grid_seed": original_layout["grid_seed"],
+            "grid_size": original_layout["grid_size"],
+            "grid_complexity": original_layout["grid_complexity"],
+            "grid_width": env_u.width,
+            "grid_height": env_u.height,
+            "target_dead_ends": original_layout.get("target_dead_ends"),
+            "actual_dead_ends": len(get_all_dead_ends(env_u)),
+            "place_at_dead_ends": original_layout.get("place_at_dead_ends", False),
+            "coin_placement": original_layout.get("coin_placement"),
+            "coin_pos": list(coin_pos) if coin_pos is not None else None,
+            "agent_start_pos": agent_start_pos,
+            "agent_start_dir": getattr(env_u, "_initial_agent_dir", env_u.agent_dir),
+            "goal_pos": list(env_u.goal_pos) if env_u.goal_pos is not None else None,
+            "grid_layout": _env_to_grid_list(env_u),
+            "grid_text": wrapped_env._render(),
+            "legend": wrapped_env.grid_cells,
+        }
+
+        layout_filename = f"{original_stem}_{variant_name}_layout.json"
+        layout_path = str(Path(output_dir_str) / layout_filename)
+        with open(layout_path, "w") as f:
+            json.dump(layout_data, f, indent=2)
+        if verbose:
+            logger.info(f"Saved augmented layout to {layout_path}")
+        return layout_path
+
+    # Build all (wrapped_env, variant_name, original_stem, model_name) tasks up front
+    variant_tasks: list[tuple] = []
+    all_layout_paths: list[str] = []
+
+    for layout_path in layout_files:
+        with open(layout_path) as f:
+            layout = json.load(f)
+        layout["_source_filename"] = layout_path.name
+        original_stem = layout_path.name.removesuffix("_layout.json")
+
+        base_env_unwrapped = _reconstruct_env(layout)
+        variants = _build_variants(base_env_unwrapped)
+
+        for model_name in model_names:
+            for wrapped_env, variant_name in variants:
+                saved_path = _save_variant_layout(wrapped_env, layout, variant_name, original_stem)
+                all_layout_paths.append(saved_path)
+                variant_tasks.append((wrapped_env, variant_name, original_stem, model_name))
+
+    total_variants = len(variant_tasks)
+    total_trajectories = total_variants * num_trajectories_per_variant * len(reasoning_efforts)
+    logger.info(
+        f"Loaded {len(layout_files)} layout files; built {total_variants} variants. "
+        f"Generating {total_trajectories} trajectories."
+    )
+
+    def _run_variant(task: tuple) -> dict:
+        wrapped_env, variant_name, original_stem, model_name = task
+        trajectory_results = []
+
+        for effort in reasoning_efforts:
+            for traj_id in range(num_trajectories_per_variant):
+                if rate_limiter is not None:
+                    rate_limiter.acquire()
+
+                env_copy = copy.deepcopy(wrapped_env)
+                output_filename = (
+                    f"{original_stem}_{variant_name}_{effort}_traj{traj_id}.json"
+                )
+                output_path = str(Path(output_dir_str) / output_filename)
+
+                if verbose:
+                    logger.info(
+                        f"Starting trajectory: variant={variant_name}, model={model_name}, "
+                        f"effort={effort}, traj={traj_id}"
+                    )
+
+                try:
+                    get_trajectory(
+                        max_steps_per_trajectory=max_steps_per_trajectory,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
+                        top_logprobs=top_logprobs,
+                        seed=traj_id,
+                        reasoning_effort=effort,
+                        model_name=model_name,
+                        observation_placeholders=observation_placeholders,
+                        output_path=output_path,
+                        verbose=verbose,
+                        enable_dynamic_max_steps=enable_dynamic_max_steps,
+                        env=env_copy,
+                        use_safe_reset=True,
+                        transform_type=variant_name,
+                        template_name=template_name,
+                    )
+                    trajectory_results.append({"status": "success", "output_path": output_path})
+                except Exception as e:
+                    logger.error(
+                        f"Failed: variant={variant_name}, effort={effort}, traj={traj_id}: {e}"
+                    )
+                    trajectory_results.append(
+                        {"status": "error", "error": str(e), "output_path": output_path}
+                    )
+
+        return {"trajectory_results": trajectory_results}
+
+    effective_workers = max_workers if max_workers is not None else min(32, total_variants)
+    all_trajectory_results: list[dict] = []
+
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        futures = {executor.submit(_run_variant, task): task for task in variant_tasks}
+        for future in tqdm(
+            as_completed(futures),
+            total=total_variants,
+            desc="Augmenting variants",
+            unit="variant",
+        ):
+            task = futures[future]
+            try:
+                result = future.result()
+                all_trajectory_results.extend(result["trajectory_results"])
+                failures = [r for r in result["trajectory_results"] if r["status"] != "success"]
+                for failure in failures:
+                    tqdm.write(
+                        f"Failed for variant {task[1]}: {failure.get('error', 'Unknown error')}"
+                    )
+            except Exception as e:
+                tqdm.write(f"Exception for variant {task[1]}: {e}")
+                all_trajectory_results.append({"status": "error", "error": str(e)})
+
+    success_count = sum(1 for r in all_trajectory_results if r["status"] == "success")
+    logger.info(
+        f"Completed {success_count}/{total_trajectories} augmented trajectories successfully. "
+        f"Saved {len(all_layout_paths)} augmented layout files."
+    )
+
+    if hf_repo_id is not None and (success_count > 0 or all_layout_paths):
+        paths_to_upload = [
+            r["output_path"] for r in all_trajectory_results if r["status"] == "success"
+        ]
+        paths_to_upload.extend(all_layout_paths)
+        if paths_to_upload:
+            return upload_files_to_huggingface(
+                file_paths=paths_to_upload,
                 repo_id=hf_repo_id,
                 path_prefix=hf_path_prefix,
                 hf_token=hf_token,

@@ -218,4 +218,7 @@ __marimo__/
 **/.DS_Store
 data/
 
+# Data
 coin_trajectories/
+analysis/outputs/
+!analysis/outputs/**/*.ipynb
