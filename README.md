@@ -44,6 +44,13 @@ Do not commit this file — it is already in `.gitignore`.
 ## Repository structure
 
 ```
+├── analysis/                        # Offline analysis scripts
+│   ├── metrics.py                   # Pure math: entropy, JSD, KL, calibration, stats
+│   ├── visualization.py             # Shared matplotlib helpers (paper-quality figures)
+│   ├── grid_env_utils.py            # MiniGrid-specific: optimal actions, cell processing
+│   ├── analysis_utils.py            # Trajectory data classes, Dijkstra, logprob parsing
+│   ├── full_obs_trajectory_analysis.py  # Metrics + plots for standard navigation
+│   └── coin_trajectory_analysis.py  # Phase-aware metrics + plots for coin envs
 ├── data/                            # Output trajectories (gitignored)
 ├── src/
 │   └── coinenv/
@@ -51,6 +58,7 @@ Do not commit this file — it is already in `.gitignore`.
 │       ├── commands/                # CLI entry point and subcommands
 │       │   └── get_trajectory/      # Trajectory generation logic and utilities
 │       ├── environment_generator/   # MiniGrid environment construction
+│       │   ├── env_transformations.py   # ISO-difficulty grid transforms
 │       │   └── wrappers/            # Text and RGB observation wrappers
 │       ├── templates/               # Jinja2 prompt templates
 │       ├── trajectory_generator/    # Step loop
@@ -72,10 +80,9 @@ The package exposes a `coinenv-cli` command after installation. The entry point 
 | `get_trajectory` | Generate a single trajectory |
 | `get_trajectories` | Batch generation across parameter combinations |
 | `get_trajectories_multiple_per_grid` | Multiple trajectories on the same grid |
-| `get_trajectory_deadend_env` | Single trajectory with dead-end constraints and optional coin |
-| `get_trajectories_coin_env` | Batch coin environment trajectories |
-| `get_trajectory_key_door_env` | Single trajectory in a rooms/key/door environment |
-| `get_trajectories_key_door_env` | Batch rooms/key/door trajectories |
+| `get_single_trajectory_coin_env` | Single trajectory with dead-end constraints and optional coin |
+| `get_multiple_trajectories_coin_env` | Batch coin environment trajectories |
+| `augment_from_layouts` | Generate trajectories on ISO-difficulty augmented variants of saved layouts |
 | `upload_trajectories_dir` | Push saved trajectories to HuggingFace Hub |
 
 All output paths are relative to the `data/` folder at the project root — specify just a filename or subfolder name:
@@ -213,6 +220,87 @@ Token-level logprobs are stored per step for downstream mechanistic interpretabi
 
 ---
 
+## ISO-difficulty environment transforms
+
+`env_transformations.py` implements structure-preserving grid transformations that change the spatial layout without altering task difficulty (same optimal path length):
+
+| Transform | Description |
+|---|---|
+| `RotateEnv` | 90° counter-clockwise rotation |
+| `ReflectEnv` | Vertical (top/bottom) reflection |
+| `TransposeEnv` | Transpose (swap x and y axes) |
+| `StartGoalSwap` | Swap agent start and goal positions |
+
+These are used by `augment_from_layouts` to test whether model behaviour generalises across equivalent problem instances.
+
+---
+
+## Analysis
+
+The `analysis/` package computes metrics from saved trajectory JSONs and generates plots. Run from the project root with:
+
+```bash
+# Standard navigation trajectories
+python -m analysis.full_obs_trajectory_analysis \
+  --trajectory-dir data/<run_dir> \
+  --output-dir analysis/outputs/<run_name>
+
+# Coin navigation trajectories (phase-aware)
+python -m analysis.coin_trajectory_analysis \
+  --trajectory-dir data/<run_dir> \
+  --output-dir analysis/outputs/<run_name>
+```
+
+Both scripts accept `--multi-model` to process multiple model subdirectories in one pass.
+
+### Metrics computed
+
+**Success & capability**
+
+| Metric | Description |
+|---|---|
+| `full_success_rate` | Fraction of trajectories completing all objectives |
+| `coin_collected_rate` | Fraction that collected the coin (coin env only) |
+| `mean_action_accuracy` | Fraction of steps matching an optimal action |
+| `mean_action_accuracy_phase1/2` | Per-phase accuracy toward coin / goal |
+| `spl` | Success weighted by (inverse) path length |
+
+**Uncertainty** (computed from empirical action distributions pooled across trajectories — grid-level only)
+
+| Metric | Description |
+|---|---|
+| `mean_entropy` | Empirical action entropy at each visited state |
+| `mean_jsd` | Jensen-Shannon divergence from the optimal policy |
+| `ece` | Expected calibration error |
+
+**Layout & navigation geometry** (coin env, per trajectory)
+
+| Metric | Description |
+|---|---|
+| `astar_coin_distance` | Optimal distance: start → coin |
+| `astar_goal_distance` | Optimal distance: coin → goal |
+| `start_to_goal_distance` | Direct optimal distance: start → goal (ignoring coin) |
+| `coin_detour_distance` | Min distance from coin to any cell on the optimal start→goal path |
+
+**Behavioural counts** (per trajectory, raw counts)
+
+| Metric | Description |
+|---|---|
+| `num_actions_up/down/left/right` | Absolute action frequencies |
+| `num_steps_front/left_turn/right_turn/back` | Relative direction counts (orientation from previous step) |
+| `num_backtracks` | Steps revisiting any previously visited cell |
+| `num_backtracks_at_coin` | Steps revisiting the coin cell specifically |
+
+### Outputs
+
+Each run produces:
+- **Per-grid CSV** — one row per (grid × effort) combination with all metrics including entropy/JSD/ECE
+- **Per-trajectory CSV** (`coin_per_trajectory_*.csv`) — one row per individual trajectory with all independently computable metrics (excludes entropy/JSD/ECE)
+- Size×density summary CSV, distance summary CSV, overall summary JSON
+- Figures (PNG + PDF) under `analysis/outputs/<run_name>/`
+
+---
+
 ## Key files
 
 | File | Role |
@@ -228,4 +316,12 @@ Token-level logprobs are stored per step for downstream mechanistic interpretabi
 | `src/coinenv/templates/` | Jinja2 prompt templates |
 | `src/coinenv/trajectory_generator/trajectory_generator.py` | Step-by-step environment loop |
 | `src/coinenv/datatypes.py` | `Step`, `Trajectory`, `Action` data structures |
-| `src/coinenv/environment_generator/` | MiniGrid environment construction and wrappers |
+| `src/coinenv/environment_generator/custom_minigrid.py` | `Simple2DNavigationEnv` and `CoinNavigationEnv` |
+| `src/coinenv/environment_generator/env_transformations.py` | ISO-difficulty grid transforms |
+| `src/coinenv/environment_generator/utils.py` | Grid utilities (dead-end detection, A* distance, coin position) |
+| `analysis/metrics.py` | Pure math utilities: entropy, JSD, KL, calibration, stats |
+| `analysis/visualization.py` | Shared matplotlib helpers used by both analysis pipelines |
+| `analysis/grid_env_utils.py` | MiniGrid-specific: env-based Dijkstra, cell processing, metadata loading |
+| `analysis/analysis_utils.py` | Trajectory data classes, text-grid Dijkstra, logprob parsing |
+| `analysis/full_obs_trajectory_analysis.py` | Metrics and plots for standard navigation trajectories |
+| `analysis/coin_trajectory_analysis.py` | Phase-aware metrics and plots for coin navigation trajectories |

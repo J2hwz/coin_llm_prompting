@@ -34,7 +34,6 @@ import gc
 import json
 import re
 from collections import defaultdict
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -46,14 +45,10 @@ from tqdm import tqdm
 
 from analysis.analysis_utils import (
     ACTION_NAME_TO_ID,
-    ActionDist,
-    LightweightTrajectory,
     OptimalActionSet,
     TrajectoryGridParams,
     TrajectoryStep,
     compute_optimal_actions_from_text_grid,
-    compute_spl,
-    compute_trajectory_action_accuracy,
     extract_agent_position_from_grid_state,
     jensen_shannon_divergence,
     optimal_entropy,
@@ -66,13 +61,11 @@ from analysis.full_obs_trajectory_analysis import (
     compute_ece,
     compute_empirical_uncertainty_metrics,
     compute_summary_by_distance,
-    compute_summary_by_size_density,
     discover_model_directories,
+)
+from analysis.visualization import (
     plot_capability_vs_uncertainty,
-    plot_distance_density_heatmap,
-    plot_heatmaps,
     plot_metrics_by_distance,
-    plot_metrics_by_size_density,
     save_figure,
     setup_paper_style,
 )
@@ -94,6 +87,8 @@ class CoinTrajectoryGridParams(TrajectoryGridParams):
     astar_coin_distance: int = 0       # A* dist: start → coin
     astar_goal_distance: int = 0       # A* dist: coin → goal
     astar_total_distance: int = 0      # = astar_coin_distance + astar_goal_distance
+    start_to_goal_distance: int = 0    # A* dist: start → goal (ignoring coin)
+    coin_detour_distance: int = 0      # min dist from coin to any cell on optimal start→goal path
 
 
 @dataclass
@@ -107,6 +102,7 @@ class CoinLightweightTrajectory:
     coin_collection_step: Optional[int]  # step index when coin was collected, or None
     reasoning_effort: str = "low"
     transform_type: str = "base"
+    trajectory_id: int = 0
 
     @property
     def trajectory_length(self) -> int:
@@ -140,6 +136,8 @@ class CoinGridTrajectoryMetrics:
     astar_coin_distance: int
     astar_goal_distance: int
     astar_total_distance: int
+    start_to_goal_distance: int    # direct start→goal (ignoring coin)
+    coin_detour_distance: int      # min dist from coin to optimal start→goal path
 
     # --- Success breakdown ---
     num_trajectories: int
@@ -171,6 +169,22 @@ class CoinGridTrajectoryMetrics:
     mean_step_accuracy: float
     total_steps: int
 
+    # --- Absolute action counts (mean per trajectory) ---
+    mean_actions_up: float = 0.0
+    mean_actions_down: float = 0.0
+    mean_actions_left: float = 0.0
+    mean_actions_right: float = 0.0
+
+    # --- Relative direction counts (mean per trajectory, orientation from previous step) ---
+    mean_steps_front: float = 0.0
+    mean_steps_left_turn: float = 0.0
+    mean_steps_right_turn: float = 0.0
+    mean_steps_back: float = 0.0      # immediate reversal (double-back)
+
+    # --- Backtracking (mean per trajectory) ---
+    mean_backtracks: float = 0.0           # steps revisiting any previously visited cell
+    mean_backtracks_at_coin: float = 0.0   # steps revisiting the coin cell specifically
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "grid_id": self.grid_id,
@@ -182,6 +196,8 @@ class CoinGridTrajectoryMetrics:
             "astar_coin_distance": self.astar_coin_distance,
             "astar_goal_distance": self.astar_goal_distance,
             "astar_total_distance": self.astar_total_distance,
+            "start_to_goal_distance": self.start_to_goal_distance,
+            "coin_detour_distance": self.coin_detour_distance,
             "num_trajectories": self.num_trajectories,
             "num_coin_collected": self.num_coin_collected,
             "num_goal_after_coin": self.num_goal_after_coin,
@@ -205,6 +221,16 @@ class CoinGridTrajectoryMetrics:
             "ece": self.ece,
             "mean_step_accuracy": self.mean_step_accuracy,
             "total_steps": self.total_steps,
+            "mean_actions_up": self.mean_actions_up,
+            "mean_actions_down": self.mean_actions_down,
+            "mean_actions_left": self.mean_actions_left,
+            "mean_actions_right": self.mean_actions_right,
+            "mean_steps_front": self.mean_steps_front,
+            "mean_steps_left_turn": self.mean_steps_left_turn,
+            "mean_steps_right_turn": self.mean_steps_right_turn,
+            "mean_steps_back": self.mean_steps_back,
+            "mean_backtracks": self.mean_backtracks,
+            "mean_backtracks_at_coin": self.mean_backtracks_at_coin,
         }
 
 
@@ -218,6 +244,7 @@ class CoinModelTrajectoryResults:
     summary_by_size_density: pd.DataFrame
     summary_by_distance: pd.DataFrame
     overall_summary: dict[str, Any]
+    per_trajectory_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 # =============================================================================
@@ -226,8 +253,8 @@ class CoinModelTrajectoryResults:
 
 
 def parse_coin_trajectory_filename(filename: str) -> Optional[dict[str, Any]]:
-    """Parse coin trajectory filename to extract metadata.
-
+    """
+    Parse coin trajectory filename to extract metadata.
     Expected format: {model}_size{N}_comp{X.X}_grid{N}_coin_{effort}_traj{N}.json
     """
     pattern = r"(.+)_size(\d+)_comp([\d.]+)_grid(\d+)_coin_(\w+)_traj(\d+)\.json"
@@ -236,6 +263,8 @@ def parse_coin_trajectory_filename(filename: str) -> Optional[dict[str, Any]]:
         return None
 
     model, size, comp, grid_id, effort_field, traj_id = match.groups()
+
+    # Splitting iso_transform from parsed effort 
     if effort_field in KNOWN_EFFORTS:
         transform_type = "base"
         reasoning_effort = effort_field
@@ -392,6 +421,8 @@ def load_coin_trajectory(
     goal_pos: tuple[int, int],
     astar_coin_distance: int,
     astar_goal_distance: int,
+    start_to_goal_distance: int = 0,
+    coin_detour_distance: int = 0,
 ) -> Optional[CoinLightweightTrajectory]:
     """Load a coin trajectory file and detect coin collection from grid states."""
     try:
@@ -406,6 +437,7 @@ def load_coin_trajectory(
         grid_id = parsed["grid_id"] if parsed else 0
         effort = parsed["reasoning_effort"] if parsed else "unknown"
         transform_type = parsed["transform_type"] if parsed else "base"
+        trajectory_id = parsed["trajectory_id"] if parsed else 0
 
         grid_params = CoinTrajectoryGridParams(
             grid_size=gp.get("grid_width", 0),
@@ -418,6 +450,8 @@ def load_coin_trajectory(
             astar_coin_distance=astar_coin_distance,
             astar_goal_distance=astar_goal_distance,
             astar_total_distance=astar_coin_distance + astar_goal_distance,
+            start_to_goal_distance=start_to_goal_distance,
+            coin_detour_distance=coin_detour_distance,
         )
 
         raw_steps = data.get("steps", [])
@@ -451,6 +485,7 @@ def load_coin_trajectory(
             coin_collection_step=coin_collection_step,
             reasoning_effort=effort,
             transform_type=transform_type,
+            trajectory_id=trajectory_id,
         )
 
     except (json.JSONDecodeError, KeyError, TypeError) as e:
@@ -501,9 +536,102 @@ def get_step_optimal_actions(
     return opt_to_goal.get(step.agent_position, set()) if in_phase2 else opt_to_coin.get(step.agent_position, set())
 
 
+def compute_coin_detour_distance(
+    grid_layout: list[list[str]],
+    agent_start: tuple[int, int],
+    dist_to_coin: dict[tuple[int, int], int],
+    dist_to_goal: dict[tuple[int, int], int],
+) -> int:
+    """Min distance from the coin to any cell on an optimal start→goal path.
+
+    A cell c lies on an optimal path iff
+        dist_from_start[c] + dist_to_goal[c] == dist_to_goal[agent_start].
+    Returns -1 if the goal is unreachable from start.
+    """
+    start_to_goal = dist_to_goal.get(agent_start, -1)
+    if start_to_goal < 0:
+        return -1
+
+    # Backward Dijkstra from agent_start gives dist_from_start (undirected grid).
+    _, dist_from_start = compute_optimal_actions_from_text_grid(grid_layout, agent_start)
+
+    min_detour = float("inf")
+    for cell, d_from_start in dist_from_start.items():
+        d_to_goal = dist_to_goal.get(cell, float("inf"))
+        if d_from_start + d_to_goal == start_to_goal:
+            d_to_coin = dist_to_coin.get(cell, float("inf"))
+            if d_to_coin < min_detour:
+                min_detour = d_to_coin
+
+    return int(min_detour) if min_detour != float("inf") else -1
+
+
 # =============================================================================
 # Metrics Computation
 # =============================================================================
+
+
+_OPPOSITE  = {"UP": "DOWN", "DOWN": "UP",   "LEFT": "RIGHT", "RIGHT": "LEFT"}
+_LEFT_TURN = {"UP": "LEFT", "DOWN": "RIGHT", "LEFT": "DOWN",  "RIGHT": "UP"}
+
+
+def compute_trajectory_movement_stats(
+    traj: CoinLightweightTrajectory,
+) -> dict[str, int]:
+    """Absolute action counts, relative direction counts, and backtrack counts.
+
+    Relative directions are computed from the perspective of the agent's heading
+    (direction of the previous step). Backtracking counts revisits to any
+    previously visited cell; coin backtracking counts revisits specifically
+    to the coin cell.
+    """
+    action_counts: dict[str, int] = {"UP": 0, "DOWN": 0, "LEFT": 0, "RIGHT": 0}
+    rel_counts: dict[str, int] = {"front": 0, "left_turn": 0, "right_turn": 0, "back": 0}
+
+    visited: set[tuple[int, int]] = set()
+    num_backtracks = 0
+    num_backtracks_at_coin = 0
+    coin_pos = traj.grid_params.coin_pos
+
+    for i, step in enumerate(traj.steps):
+        action = step.agent_action.upper()
+        pos = step.agent_position
+
+        if action in action_counts:
+            action_counts[action] += 1
+
+        # Relative direction (requires knowing the previous step's heading)
+        if i > 0:
+            prev = traj.steps[i - 1].agent_action.upper()
+            if prev in action_counts and action in action_counts:
+                if action == prev:
+                    rel_counts["front"] += 1
+                elif action == _OPPOSITE[prev]:
+                    rel_counts["back"] += 1
+                elif action == _LEFT_TURN[prev]:
+                    rel_counts["left_turn"] += 1
+                else:
+                    rel_counts["right_turn"] += 1
+
+        # Backtracking: revisiting a cell already in the trajectory
+        if pos in visited:
+            num_backtracks += 1
+            if pos == coin_pos:
+                num_backtracks_at_coin += 1
+        visited.add(pos)
+
+    return {
+        "num_actions_up":          action_counts["UP"],
+        "num_actions_down":        action_counts["DOWN"],
+        "num_actions_left":        action_counts["LEFT"],
+        "num_actions_right":       action_counts["RIGHT"],
+        "num_steps_front":         rel_counts["front"],
+        "num_steps_left_turn":     rel_counts["left_turn"],
+        "num_steps_right_turn":    rel_counts["right_turn"],
+        "num_steps_back":          rel_counts["back"],
+        "num_backtracks":          num_backtracks,
+        "num_backtracks_at_coin":  num_backtracks_at_coin,
+    }
 
 
 def compute_phase_accuracy(
@@ -594,6 +722,79 @@ def compute_coin_spl(
     return sum(spls) / len(spls)
 
 
+def compute_single_trajectory_row(
+    traj: CoinLightweightTrajectory,
+    opt_to_coin: dict[tuple[int, int], OptimalActionSet],
+    opt_to_goal: dict[tuple[int, int], OptimalActionSet],
+    grid_key: str,
+) -> dict[str, Any]:
+    """Build one CSV row for a single trajectory.
+
+    Entropy/JSD/ECE are omitted — they require pooled empirical distributions
+    and are computed at grid level only.
+    """
+    gp = traj.grid_params
+
+    # Phase-aware action accuracy
+    p1_correct, p1_total = 0, 0
+    p2_correct, p2_total = 0, 0
+    for step in traj.steps:
+        action_id = ACTION_NAME_TO_ID.get(step.agent_action.upper())
+        in_phase2 = (
+            traj.coin_collection_step is not None
+            and step.step_id > traj.coin_collection_step
+        )
+        optimal_set = (
+            opt_to_goal.get(step.agent_position, set())
+            if in_phase2
+            else opt_to_coin.get(step.agent_position, set())
+        )
+        is_correct = int(action_id is not None and action_id in optimal_set)
+        if in_phase2:
+            p2_correct += is_correct
+            p2_total += 1
+        else:
+            p1_correct += is_correct
+            p1_total += 1
+
+    acc1 = p1_correct / p1_total if p1_total > 0 else 0.0
+    acc2 = p2_correct / p2_total if p2_total > 0 else 0.0
+    total_steps = p1_total + p2_total
+    acc_combined = (p1_correct + p2_correct) / total_steps if total_steps > 0 else 0.0
+
+    # Per-trajectory SPL: int(success) * L* / max(L*, L)
+    L_star = gp.astar_total_distance
+    L = traj.trajectory_length
+    success = traj.reached_goal and traj.coin_collected
+    spl = (L_star / max(L_star, L)) if (success and L_star > 0) else 0.0
+
+    move = compute_trajectory_movement_stats(traj)
+
+    return {
+        "trajectory_id":          traj.trajectory_id,
+        "grid_id":                gp.grid_id,
+        "grid_key":               grid_key,
+        "grid_size":              gp.grid_size,
+        "density":                gp.complexity,
+        "reasoning_effort":       traj.reasoning_effort,
+        "transform_type":         traj.transform_type,
+        "astar_coin_distance":    gp.astar_coin_distance,
+        "astar_goal_distance":    gp.astar_goal_distance,
+        "astar_total_distance":   gp.astar_total_distance,
+        "start_to_goal_distance": gp.start_to_goal_distance,
+        "coin_detour_distance":   gp.coin_detour_distance,
+        "reached_goal":           int(traj.reached_goal),
+        "coin_collected":         int(traj.coin_collected),
+        "coin_collection_step":   traj.coin_collection_step if traj.coin_collection_step is not None else -1,
+        "trajectory_length":      L,
+        "spl":                    spl,
+        "action_accuracy":        acc_combined,
+        "action_accuracy_phase1": acc1,
+        "action_accuracy_phase2": acc2,
+        **move,
+    }
+
+
 def compute_coin_grid_metrics(
     trajectories: list[CoinLightweightTrajectory],
     opt_to_coin: dict[tuple[int, int], OptimalActionSet],
@@ -620,6 +821,8 @@ def compute_coin_grid_metrics(
     astar_coin = gp.astar_coin_distance
     astar_goal = gp.astar_goal_distance
     astar_total = gp.astar_total_distance
+    start_to_goal = gp.start_to_goal_distance
+    coin_detour = gp.coin_detour_distance
 
     # Success breakdown
     num_coin = sum(1 for t in trajectories if t.coin_collected)
@@ -656,6 +859,18 @@ def compute_coin_grid_metrics(
     ent1, jsd1, ent2, jsd2 = compute_phase_uncertainty(trajectories, opt_to_coin, opt_to_goal)
 
     mean_step_accuracy = total_correct / total_steps if total_steps > 0 else 0.0
+
+    # Movement stats — averaged across trajectories
+    move_keys = [
+        "num_actions_up", "num_actions_down", "num_actions_left", "num_actions_right",
+        "num_steps_front", "num_steps_left_turn", "num_steps_right_turn", "num_steps_back",
+        "num_backtracks", "num_backtracks_at_coin",
+    ]
+    move_totals: dict[str, float] = {k: 0.0 for k in move_keys}
+    for traj in trajectories:
+        for k, v in compute_trajectory_movement_stats(traj).items():
+            move_totals[k] += v
+    move_means = {k: v / n for k, v in move_totals.items()}
 
     # Per-state metrics for distance analysis (use dist_to_goal as reference distance)
     state_metrics: list[dict[str, Any]] = []
@@ -699,6 +914,8 @@ def compute_coin_grid_metrics(
         astar_coin_distance=astar_coin,
         astar_goal_distance=astar_goal,
         astar_total_distance=astar_total,
+        start_to_goal_distance=start_to_goal,
+        coin_detour_distance=coin_detour,
         num_trajectories=n,
         num_coin_collected=num_coin,
         num_goal_after_coin=num_full,
@@ -722,6 +939,16 @@ def compute_coin_grid_metrics(
         ece=ece,
         mean_step_accuracy=mean_step_accuracy,
         total_steps=total_steps,
+        mean_actions_up=move_means["num_actions_up"],
+        mean_actions_down=move_means["num_actions_down"],
+        mean_actions_left=move_means["num_actions_left"],
+        mean_actions_right=move_means["num_actions_right"],
+        mean_steps_front=move_means["num_steps_front"],
+        mean_steps_left_turn=move_means["num_steps_left_turn"],
+        mean_steps_right_turn=move_means["num_steps_right_turn"],
+        mean_steps_back=move_means["num_steps_back"],
+        mean_backtracks=move_means["num_backtracks"],
+        mean_backtracks_at_coin=move_means["num_backtracks_at_coin"],
     )
 
     return metrics, state_metrics
@@ -756,6 +983,7 @@ def process_model_coin_trajectories(
 
     all_metrics: list[CoinGridTrajectoryMetrics] = []
     all_state_metrics: list[dict[str, Any]] = []
+    all_traj_rows: list[dict[str, Any]] = []
 
     grid_keys = sorted(grouped.keys())
     total_batches = (len(grid_keys) + batch_size - 1) // batch_size
@@ -792,18 +1020,19 @@ def process_model_coin_trajectories(
                 compute_two_phase_optimal_actions(grid_layout, coin_pos, goal_pos)
             )
 
-            # Compute A* distances: start→coin and coin→goal
-            agent_start_raw = parsed  # we'll get it from the first trajectory file
-            astar_coin = dist_to_coin.get(
-                # start position from the layout file if available
-                coin_pos, 0  # fallback; actual value loaded per trajectory below
-            )
+            # A* distance from coin to goal (start→coin loaded per trajectory below)
             astar_goal_from_coin = dist_to_goal.get(coin_pos, 0)
+
+            # Grid-level distances computed once from the first trajectory's agent_start
+            # (all trajectories for a grid share the same start position).
+            _grid_start_to_goal: int = 0
+            _grid_coin_detour: int = 0
+            _grid_distances_computed = False
 
             # Load trajectories
             trajectories: list[CoinLightweightTrajectory] = []
             for traj_file in traj_files:
-                # Get agent start from first trajectory to compute proper A* distances
+                # Get agent start to compute proper A* distances
                 try:
                     with open(traj_file, "r") as f:
                         raw_data = json.load(f)
@@ -812,7 +1041,15 @@ def process_model_coin_trajectories(
                     agent_start = (int(start_coords[1]), int(start_coords[0]))
                     astar_coin_dist = dist_to_coin.get(agent_start, 0)
                 except Exception:
+                    agent_start = (0, 0)
                     astar_coin_dist = 0
+
+                if not _grid_distances_computed:
+                    _grid_start_to_goal = dist_to_goal.get(agent_start, 0)
+                    _grid_coin_detour = compute_coin_detour_distance(
+                        grid_layout, agent_start, dist_to_coin, dist_to_goal
+                    )
+                    _grid_distances_computed = True
 
                 traj = load_coin_trajectory(
                     traj_file,
@@ -820,9 +1057,14 @@ def process_model_coin_trajectories(
                     goal_pos=goal_pos,
                     astar_coin_distance=astar_coin_dist,
                     astar_goal_distance=astar_goal_from_coin,
+                    start_to_goal_distance=_grid_start_to_goal,
+                    coin_detour_distance=_grid_coin_detour,
                 )
                 if traj is not None:
                     trajectories.append(traj)
+                    all_traj_rows.append(
+                        compute_single_trajectory_row(traj, opt_to_coin, opt_to_goal, grid_key)
+                    )
 
             if not trajectories:
                 continue
@@ -841,6 +1083,7 @@ def process_model_coin_trajectories(
 
     df = pd.DataFrame([m.to_dict() for m in all_metrics])
     state_df = pd.DataFrame(all_state_metrics)
+    per_traj_df = pd.DataFrame(all_traj_rows)
 
     summary_df = _compute_coin_summary_by_size_density(df)
     distance_df = compute_summary_by_distance(state_df) if not state_df.empty else pd.DataFrame()
@@ -853,6 +1096,7 @@ def process_model_coin_trajectories(
         summary_by_size_density=summary_df,
         summary_by_distance=distance_df,
         overall_summary=overall,
+        per_trajectory_df=per_traj_df,
     )
 
 
@@ -893,6 +1137,18 @@ def _compute_coin_summary_by_size_density(df: pd.DataFrame) -> pd.DataFrame:
             mean_jsd_phase1=("mean_jsd_phase1", "mean"),
             mean_jsd_phase2=("mean_jsd_phase2", "mean"),
             mean_ece=("ece", "mean"),
+            mean_start_to_goal_distance=("start_to_goal_distance", "mean"),
+            mean_coin_detour_distance=("coin_detour_distance", "mean"),
+            mean_actions_up=("mean_actions_up", "mean"),
+            mean_actions_down=("mean_actions_down", "mean"),
+            mean_actions_left=("mean_actions_left", "mean"),
+            mean_actions_right=("mean_actions_right", "mean"),
+            mean_steps_front=("mean_steps_front", "mean"),
+            mean_steps_left_turn=("mean_steps_left_turn", "mean"),
+            mean_steps_right_turn=("mean_steps_right_turn", "mean"),
+            mean_steps_back=("mean_steps_back", "mean"),
+            mean_backtracks=("mean_backtracks", "mean"),
+            mean_backtracks_at_coin=("mean_backtracks_at_coin", "mean"),
         )
         .reset_index()
     )
@@ -914,6 +1170,11 @@ def _compute_coin_overall_summary(df: pd.DataFrame) -> dict[str, Any]:
         "overall_mean_entropy": float(df["mean_entropy"].mean()),
         "overall_mean_jsd": float(df["mean_jsd"].mean()),
         "overall_ece": float(df["ece"].mean()),
+        "overall_mean_start_to_goal_distance": float(df["start_to_goal_distance"].mean()),
+        "overall_mean_coin_detour_distance": float(df["coin_detour_distance"].mean()),
+        "overall_mean_backtracks": float(df["mean_backtracks"].mean()),
+        "overall_mean_backtracks_at_coin": float(df["mean_backtracks_at_coin"].mean()),
+        "overall_mean_steps_back": float(df["mean_steps_back"].mean()),
     }
 
     if "reasoning_effort" in df.columns:
@@ -1066,6 +1327,12 @@ def save_coin_results(
     results.df.to_csv(grid_path, index=False)
     output_paths["grid_metrics"] = grid_path
     print(f"  Saved: {grid_path}")
+
+    if not results.per_trajectory_df.empty:
+        traj_path = model_dir / f"coin_per_trajectory_{results.model_name}.csv"
+        results.per_trajectory_df.to_csv(traj_path, index=False)
+        output_paths["per_trajectory"] = traj_path
+        print(f"  Saved: {traj_path}")
 
     summary_path = model_dir / "coin_summary_by_size_complexity.csv"
     results.summary_by_size_density.to_csv(summary_path, index=False)
