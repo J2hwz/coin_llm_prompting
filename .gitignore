@@ -221,4 +221,5 @@ data/
 # Data
 coin_trajectories/
 analysis/outputs/
+analysis/archive/
 !analysis/outputs/**/*.ipynb
