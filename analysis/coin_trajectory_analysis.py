@@ -16,13 +16,37 @@ Capability Metrics (phase-aware):
 - mean_action_accuracy_phase1: accuracy toward coin (steps before coin collected)
 - mean_action_accuracy_phase2: accuracy toward goal (steps after coin collected)
 - mean_action_accuracy:        weighted average across both phases
-- spl:                         SPL using optimal_coin_distance + optimal_goal_distance as L*
+- spl:                         SPL using optimal_coin_distance + optimal_goal_distance as L*. Essentially calculates the ratio of optimal path to actual path taken. If 1 = fully optimal.
 
 Uncertainty Metrics (empirical distributions, phase-split):
 - mean_entropy_phase1 / mean_entropy_phase2
 - mean_jsd_phase1 / mean_jsd_phase2
 - mean_entropy / mean_jsd: weighted averages
 - ece: Expected Calibration Error across all steps
+
+Movement Metrics (mean per trajectory):
+  Absolute action counts:
+  - mean_actions_up / mean_actions_down / mean_actions_left / mean_actions_right
+
+  Relative direction counts (relative to the previous step's heading):
+  - mean_steps_front:      continued in same direction
+  - mean_steps_left_turn:  turned left relative to heading
+  - mean_steps_right_turn: turned right relative to heading
+  - mean_steps_back:       immediate reversal (180-degree turn)
+
+  Revisit counts:
+  - mean_cell_revisits:      steps landing on any previously visited cell
+  - mean_immediate_revisits: steps returning to the immediately preceding cell (double-back)
+  - mean_coin_oscillations:  steps oscillating through the coin cell — arriving at coin (revisit)
+                             or departing coin to a previously-visited adjacent cell
+
+Distance Metrics (A* shortest paths on the grid):
+- start_to_coin_distance:          start → coin
+- coin_to_goal_distance:           coin → goal
+- start_to_goal_via_coin_distance: start → coin → goal (= sum of the two above)
+- start_to_goal_distance:          start → goal directly (ignoring coin)
+- coin_detour_distance:            min distance from the coin to any cell on the optimal
+                                   start → goal path (how far off the direct route the coin lies)
 
 Optimal actions are computed via backward Dijkstra:
   Phase 1: target = coin_pos  (before coin collected)
@@ -84,9 +108,9 @@ class CoinTrajectoryGridParams(TrajectoryGridParams):
     """Grid parameters extended with coin position."""
 
     coin_pos: Optional[tuple[int, int]] = None
-    astar_coin_distance: int = 0       # A* dist: start → coin
-    astar_goal_distance: int = 0       # A* dist: coin → goal
-    astar_total_distance: int = 0      # = astar_coin_distance + astar_goal_distance
+    start_to_coin_distance: int = 0       # A* dist: start → coin
+    coin_to_goal_distance: int = 0       # A* dist: coin → goal
+    start_to_goal_via_coin_distance: int = 0      # = start_to_coin_distance + coin_to_goal_distance
     start_to_goal_distance: int = 0    # A* dist: start → goal (ignoring coin)
     coin_detour_distance: int = 0      # min dist from coin to any cell on optimal start→goal path
 
@@ -133,9 +157,9 @@ class CoinGridTrajectoryMetrics:
     instance_id: int
     reasoning_effort: str
     transform_type: str
-    astar_coin_distance: int
-    astar_goal_distance: int
-    astar_total_distance: int
+    start_to_coin_distance: int
+    coin_to_goal_distance: int
+    start_to_goal_via_coin_distance: int
     start_to_goal_distance: int    # direct start→goal (ignoring coin)
     coin_detour_distance: int      # min dist from coin to optimal start→goal path
 
@@ -181,9 +205,10 @@ class CoinGridTrajectoryMetrics:
     mean_steps_right_turn: float = 0.0
     mean_steps_back: float = 0.0      # immediate reversal (double-back)
 
-    # --- Backtracking (mean per trajectory) ---
-    mean_backtracks: float = 0.0           # steps revisiting any previously visited cell
-    mean_backtracks_at_coin: float = 0.0   # steps revisiting the coin cell specifically
+    # --- Revisit counts (mean per trajectory) ---
+    mean_cell_revisits: float = 0.0        # steps landing on any previously visited cell
+    mean_immediate_revisits: float = 0.0   # steps returning to the immediately preceding cell
+    mean_coin_oscillations: float = 0.0    # steps oscillating through the coin cell
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -193,9 +218,9 @@ class CoinGridTrajectoryMetrics:
             "instance_id": self.instance_id,
             "reasoning_effort": self.reasoning_effort,
             "transform_type": self.transform_type,
-            "astar_coin_distance": self.astar_coin_distance,
-            "astar_goal_distance": self.astar_goal_distance,
-            "astar_total_distance": self.astar_total_distance,
+            "start_to_coin_distance": self.start_to_coin_distance,
+            "coin_to_goal_distance": self.coin_to_goal_distance,
+            "start_to_goal_via_coin_distance": self.start_to_goal_via_coin_distance,
             "start_to_goal_distance": self.start_to_goal_distance,
             "coin_detour_distance": self.coin_detour_distance,
             "num_trajectories": self.num_trajectories,
@@ -229,8 +254,9 @@ class CoinGridTrajectoryMetrics:
             "mean_steps_left_turn": self.mean_steps_left_turn,
             "mean_steps_right_turn": self.mean_steps_right_turn,
             "mean_steps_back": self.mean_steps_back,
-            "mean_backtracks": self.mean_backtracks,
-            "mean_backtracks_at_coin": self.mean_backtracks_at_coin,
+            "mean_cell_revisits": self.mean_cell_revisits,
+            "mean_immediate_revisits": self.mean_immediate_revisits,
+            "mean_coin_oscillations": self.mean_coin_oscillations,
         }
 
 
@@ -419,8 +445,8 @@ def load_coin_trajectory(
     filepath: Path,
     coin_pos: tuple[int, int],
     goal_pos: tuple[int, int],
-    astar_coin_distance: int,
-    astar_goal_distance: int,
+    start_to_coin_distance: int,
+    coin_to_goal_distance: int,
     start_to_goal_distance: int = 0,
     coin_detour_distance: int = 0,
 ) -> Optional[CoinLightweightTrajectory]:
@@ -443,13 +469,13 @@ def load_coin_trajectory(
             grid_size=gp.get("grid_width", 0),
             complexity=gp.get("grid_complexity", 0.0),
             grid_id=grid_id,
-            astar_distance=astar_coin_distance + astar_goal_distance,
+            astar_distance=start_to_coin_distance + coin_to_goal_distance,
             agent_start=agent_start,
             goal=goal_pos,
             coin_pos=coin_pos,
-            astar_coin_distance=astar_coin_distance,
-            astar_goal_distance=astar_goal_distance,
-            astar_total_distance=astar_coin_distance + astar_goal_distance,
+            start_to_coin_distance=start_to_coin_distance,
+            coin_to_goal_distance=coin_to_goal_distance,
+            start_to_goal_via_coin_distance=start_to_coin_distance + coin_to_goal_distance,
             start_to_goal_distance=start_to_goal_distance,
             coin_detour_distance=coin_detour_distance,
         )
@@ -578,19 +604,25 @@ _LEFT_TURN = {"UP": "LEFT", "DOWN": "RIGHT", "LEFT": "DOWN",  "RIGHT": "UP"}
 def compute_trajectory_movement_stats(
     traj: CoinLightweightTrajectory,
 ) -> dict[str, int]:
-    """Absolute action counts, relative direction counts, and backtrack counts.
+    """Absolute action counts, relative direction counts, and revisit counts.
 
     Relative directions are computed from the perspective of the agent's heading
-    (direction of the previous step). Backtracking counts revisits to any
-    previously visited cell; coin backtracking counts revisits specifically
-    to the coin cell.
+    (direction of the previous step).
+
+    Revisit counts:
+    - num_cell_revisits:     steps landing on any previously visited cell
+    - num_immediate_revisits: steps returning to the immediately preceding cell (double-back)
+    - num_coin_oscillations: steps oscillating through the coin cell — either arriving at the
+                             coin cell (previously visited) or departing the coin cell to a
+                             previously-visited adjacent cell
     """
     action_counts: dict[str, int] = {"UP": 0, "DOWN": 0, "LEFT": 0, "RIGHT": 0}
     rel_counts: dict[str, int] = {"front": 0, "left_turn": 0, "right_turn": 0, "back": 0}
 
     visited: set[tuple[int, int]] = set()
-    num_backtracks = 0
-    num_backtracks_at_coin = 0
+    num_cell_revisits = 0
+    num_immediate_revisits = 0
+    num_coin_oscillations = 0
     coin_pos = traj.grid_params.coin_pos
 
     for i, step in enumerate(traj.steps):
@@ -600,37 +632,47 @@ def compute_trajectory_movement_stats(
         if action in action_counts:
             action_counts[action] += 1
 
-        # Relative direction (requires knowing the previous step's heading)
         if i > 0:
-            prev = traj.steps[i - 1].agent_action.upper()
-            if prev in action_counts and action in action_counts:
-                if action == prev:
+            prev_pos = traj.steps[i - 1].agent_position
+            prev_action = traj.steps[i - 1].agent_action.upper()
+
+            # Relative direction
+            if prev_action in action_counts and action in action_counts:
+                if action == prev_action:
                     rel_counts["front"] += 1
-                elif action == _OPPOSITE[prev]:
+                elif action == _OPPOSITE[prev_action]:
                     rel_counts["back"] += 1
-                elif action == _LEFT_TURN[prev]:
+                elif action == _LEFT_TURN[prev_action]:
                     rel_counts["left_turn"] += 1
                 else:
                     rel_counts["right_turn"] += 1
 
-        # Backtracking: revisiting a cell already in the trajectory
+            # Double-back: returned to the cell occupied two steps ago, having actually
+            # moved away in between (excludes consecutive blocked/no-op moves)
+            if i >= 2 and pos == traj.steps[i - 2].agent_position and pos != prev_pos:
+                num_immediate_revisits += 1
+
+            # Coin oscillation: move to/from the coin cell landing on a previously visited cell
+            if (pos == coin_pos and pos in visited) or (prev_pos == coin_pos and pos in visited):
+                num_coin_oscillations += 1
+
+        # General cell revisit
         if pos in visited:
-            num_backtracks += 1
-            if pos == coin_pos:
-                num_backtracks_at_coin += 1
+            num_cell_revisits += 1
         visited.add(pos)
 
     return {
-        "num_actions_up":          action_counts["UP"],
-        "num_actions_down":        action_counts["DOWN"],
-        "num_actions_left":        action_counts["LEFT"],
-        "num_actions_right":       action_counts["RIGHT"],
-        "num_steps_front":         rel_counts["front"],
-        "num_steps_left_turn":     rel_counts["left_turn"],
-        "num_steps_right_turn":    rel_counts["right_turn"],
-        "num_steps_back":          rel_counts["back"],
-        "num_backtracks":          num_backtracks,
-        "num_backtracks_at_coin":  num_backtracks_at_coin,
+        "num_actions_up":           action_counts["UP"],
+        "num_actions_down":         action_counts["DOWN"],
+        "num_actions_left":         action_counts["LEFT"],
+        "num_actions_right":        action_counts["RIGHT"],
+        "num_steps_front":          rel_counts["front"],
+        "num_steps_left_turn":      rel_counts["left_turn"],
+        "num_steps_right_turn":     rel_counts["right_turn"],
+        "num_steps_back":           rel_counts["back"],
+        "num_cell_revisits":        num_cell_revisits,
+        "num_immediate_revisits":   num_immediate_revisits,
+        "num_coin_oscillations":    num_coin_oscillations,
     }
 
 
@@ -763,7 +805,7 @@ def compute_single_trajectory_row(
     acc_combined = (p1_correct + p2_correct) / total_steps if total_steps > 0 else 0.0
 
     # Per-trajectory SPL: int(success) * L* / max(L*, L)
-    L_star = gp.astar_total_distance
+    L_star = gp.start_to_goal_via_coin_distance
     L = traj.trajectory_length
     success = traj.reached_goal and traj.coin_collected
     spl = (L_star / max(L_star, L)) if (success and L_star > 0) else 0.0
@@ -778,9 +820,9 @@ def compute_single_trajectory_row(
         "density":                gp.complexity,
         "reasoning_effort":       traj.reasoning_effort,
         "transform_type":         traj.transform_type,
-        "astar_coin_distance":    gp.astar_coin_distance,
-        "astar_goal_distance":    gp.astar_goal_distance,
-        "astar_total_distance":   gp.astar_total_distance,
+        "start_to_coin_distance":    gp.start_to_coin_distance,
+        "coin_to_goal_distance":    gp.coin_to_goal_distance,
+        "start_to_goal_via_coin_distance":   gp.start_to_goal_via_coin_distance,
         "start_to_goal_distance": gp.start_to_goal_distance,
         "coin_detour_distance":   gp.coin_detour_distance,
         "reached_goal":           int(traj.reached_goal),
@@ -818,9 +860,9 @@ def compute_coin_grid_metrics(
     effort = pattern.group(5)
 
     gp = trajectories[0].grid_params
-    astar_coin = gp.astar_coin_distance
-    astar_goal = gp.astar_goal_distance
-    astar_total = gp.astar_total_distance
+    astar_coin = gp.start_to_coin_distance
+    astar_goal = gp.coin_to_goal_distance
+    astar_total = gp.start_to_goal_via_coin_distance
     start_to_goal = gp.start_to_goal_distance
     coin_detour = gp.coin_detour_distance
 
@@ -864,7 +906,7 @@ def compute_coin_grid_metrics(
     move_keys = [
         "num_actions_up", "num_actions_down", "num_actions_left", "num_actions_right",
         "num_steps_front", "num_steps_left_turn", "num_steps_right_turn", "num_steps_back",
-        "num_backtracks", "num_backtracks_at_coin",
+        "num_cell_revisits", "num_immediate_revisits", "num_coin_oscillations",
     ]
     move_totals: dict[str, float] = {k: 0.0 for k in move_keys}
     for traj in trajectories:
@@ -911,9 +953,9 @@ def compute_coin_grid_metrics(
         instance_id=instance_id,
         reasoning_effort=effort,
         transform_type=transform_type,
-        astar_coin_distance=astar_coin,
-        astar_goal_distance=astar_goal,
-        astar_total_distance=astar_total,
+        start_to_coin_distance=astar_coin,
+        coin_to_goal_distance=astar_goal,
+        start_to_goal_via_coin_distance=astar_total,
         start_to_goal_distance=start_to_goal,
         coin_detour_distance=coin_detour,
         num_trajectories=n,
@@ -947,8 +989,9 @@ def compute_coin_grid_metrics(
         mean_steps_left_turn=move_means["num_steps_left_turn"],
         mean_steps_right_turn=move_means["num_steps_right_turn"],
         mean_steps_back=move_means["num_steps_back"],
-        mean_backtracks=move_means["num_backtracks"],
-        mean_backtracks_at_coin=move_means["num_backtracks_at_coin"],
+        mean_cell_revisits=move_means["num_cell_revisits"],
+        mean_immediate_revisits=move_means["num_immediate_revisits"],
+        mean_coin_oscillations=move_means["num_coin_oscillations"],
     )
 
     return metrics, state_metrics
@@ -1055,8 +1098,8 @@ def process_model_coin_trajectories(
                     traj_file,
                     coin_pos=coin_pos,
                     goal_pos=goal_pos,
-                    astar_coin_distance=astar_coin_dist,
-                    astar_goal_distance=astar_goal_from_coin,
+                    start_to_coin_distance=astar_coin_dist,
+                    coin_to_goal_distance=astar_goal_from_coin,
                     start_to_goal_distance=_grid_start_to_goal,
                     coin_detour_distance=_grid_coin_detour,
                 )
@@ -1147,8 +1190,9 @@ def _compute_coin_summary_by_size_density(df: pd.DataFrame) -> pd.DataFrame:
             mean_steps_left_turn=("mean_steps_left_turn", "mean"),
             mean_steps_right_turn=("mean_steps_right_turn", "mean"),
             mean_steps_back=("mean_steps_back", "mean"),
-            mean_backtracks=("mean_backtracks", "mean"),
-            mean_backtracks_at_coin=("mean_backtracks_at_coin", "mean"),
+            mean_cell_revisits=("mean_cell_revisits", "mean"),
+            mean_immediate_revisits=("mean_immediate_revisits", "mean"),
+            mean_coin_oscillations=("mean_coin_oscillations", "mean"),
         )
         .reset_index()
     )
@@ -1172,8 +1216,9 @@ def _compute_coin_overall_summary(df: pd.DataFrame) -> dict[str, Any]:
         "overall_ece": float(df["ece"].mean()),
         "overall_mean_start_to_goal_distance": float(df["start_to_goal_distance"].mean()),
         "overall_mean_coin_detour_distance": float(df["coin_detour_distance"].mean()),
-        "overall_mean_backtracks": float(df["mean_backtracks"].mean()),
-        "overall_mean_backtracks_at_coin": float(df["mean_backtracks_at_coin"].mean()),
+        "overall_mean_cell_revisits": float(df["mean_cell_revisits"].mean()),
+        "overall_mean_immediate_revisits": float(df["mean_immediate_revisits"].mean()),
+        "overall_mean_coin_oscillations": float(df["mean_coin_oscillations"].mean()),
         "overall_mean_steps_back": float(df["mean_steps_back"].mean()),
     }
 
