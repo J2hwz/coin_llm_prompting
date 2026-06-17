@@ -50,7 +50,10 @@ Do not commit this file — it is already in `.gitignore`.
 │   ├── grid_env_utils.py            # MiniGrid-specific: optimal actions, cell processing
 │   ├── analysis_utils.py            # Trajectory data classes, Dijkstra, logprob parsing
 │   ├── full_obs_trajectory_analysis.py  # Metrics + plots for standard navigation
-│   └── coin_trajectory_analysis.py  # Phase-aware metrics + plots for coin envs
+│   ├── coin_trajectory_analysis.py  # Phase-aware metrics + plots for coin envs
+│   ├── coin_trajectory_analysis_metrics.md  # Full metrics reference for coin analysis
+│   ├── plot_trajectories.py         # Standalone trajectory plotting utilities
+│   └── traj_checking.Rmd            # R Markdown for trajectory inspection
 ├── data/                            # Output trajectories (gitignored)
 ├── src/
 │   └── coinenv/
@@ -83,6 +86,7 @@ The package exposes a `coinenv-cli` command after installation. The entry point 
 | `get_single_trajectory_coin_env` | Single trajectory with dead-end constraints and optional coin |
 | `get_multiple_trajectories_coin_env` | Batch coin environment trajectories |
 | `augment_from_layouts` | Generate trajectories on ISO-difficulty augmented variants of saved layouts |
+| `reshuffle_walls_from_layouts` | Regenerate wall layouts (same complexity, fixed anchors) and collect trajectories |
 | `upload_trajectories_dir` | Push saved trajectories to HuggingFace Hub |
 
 All output paths are relative to the `data/` folder at the project root — specify just a filename or subfolder name:

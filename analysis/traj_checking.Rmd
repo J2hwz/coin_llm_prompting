@@ -1,0 +1,30 @@
+---
+title: "Trajectory Checking"
+output: html_document
+date: "2026-06-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+```
+
+
+```{r}
+ind_traj <- read.csv("outputs/coin_trajectory_analysis/multiple_trajectories/coin_per_trajectory_multiple_trajectories.csv")
+```
+
+```{r}
+ind_traj %>%
+  filter(grid_id == 0)
+```
+
+```{r}
+mean_traj <- read.csv("outputs/coin_trajectory_analysis/multiple_trajectories/coin_trajectory_metrics_multiple_trajectories.csv")
+
+```
+

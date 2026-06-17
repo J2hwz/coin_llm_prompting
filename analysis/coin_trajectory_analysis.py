@@ -1,56 +1,6 @@
 """Analyze coin navigation trajectories with two-phase optimal policy.
 
-The coin environment has two sequential objectives:
-  1. Collect the coin (Ball at coin_pos)
-  2. Reach the terminal goal
-
-This module computes metrics that reflect both phases:
-
-Success Metrics:
-- coin_collected_rate:   fraction of trajectories that collected the coin
-- goal_after_coin_rate:  fraction that collected coin AND then reached the goal (full success)
-- goal_only_rate:        fraction that reached the goal WITHOUT collecting the coin
-- full_success_rate:     alias for goal_after_coin_rate
-
-Capability Metrics (phase-aware):
-- mean_action_accuracy_phase1: accuracy toward coin (steps before coin collected)
-- mean_action_accuracy_phase2: accuracy toward goal (steps after coin collected)
-- mean_action_accuracy:        weighted average across both phases
-- spl:                         SPL using optimal_coin_distance + optimal_goal_distance as L*. Essentially calculates the ratio of optimal path to actual path taken. If 1 = fully optimal.
-
-Uncertainty Metrics (empirical distributions, phase-split):
-- mean_entropy_phase1 / mean_entropy_phase2
-- mean_jsd_phase1 / mean_jsd_phase2
-- mean_entropy / mean_jsd: weighted averages
-- ece: Expected Calibration Error across all steps
-
-Movement Metrics (mean per trajectory):
-  Absolute action counts:
-  - mean_actions_up / mean_actions_down / mean_actions_left / mean_actions_right
-
-  Relative direction counts (relative to the previous step's heading):
-  - mean_steps_front:      continued in same direction
-  - mean_steps_left_turn:  turned left relative to heading
-  - mean_steps_right_turn: turned right relative to heading
-  - mean_steps_back:       immediate reversal (180-degree turn)
-
-  Revisit counts:
-  - mean_cell_revisits:      steps landing on any previously visited cell
-  - mean_immediate_revisits: steps returning to the immediately preceding cell (double-back)
-  - mean_coin_oscillations:  steps oscillating through the coin cell — arriving at coin (revisit)
-                             or departing coin to a previously-visited adjacent cell
-
-Distance Metrics (A* shortest paths on the grid):
-- start_to_coin_distance:          start → coin
-- coin_to_goal_distance:           coin → goal
-- start_to_goal_via_coin_distance: start → coin → goal (= sum of the two above)
-- start_to_goal_distance:          start → goal directly (ignoring coin)
-- coin_detour_distance:            min distance from the coin to any cell on the optimal
-                                   start → goal path (how far off the direct route the coin lies)
-
-Optimal actions are computed via backward Dijkstra:
-  Phase 1: target = coin_pos  (before coin collected)
-  Phase 2: target = goal_pos  (after coin collected)
+Full metrics reference: analysis/coin_trajectory_analysis_metrics.md
 """
 
 import argparse

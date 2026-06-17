@@ -12,7 +12,7 @@ from typing import Literal
 import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizer
-from minigrid.core.world_object import Ball
+from minigrid.core.world_object import Ball, Goal, Wall
 
 from coinenv.agents.llm_agent import LLMAgent
 from coinenv.commands.get_trajectory.compact_json_encoder import CompactJSONEncoder
@@ -52,6 +52,129 @@ def _resolve_output(path: str) -> Path:
     """Resolve path relative to DATA_DIR unless it is already absolute."""
     p = Path(path)
     return p if p.is_absolute() else DATA_DIR / p
+
+
+def _env_to_grid_list(env_unwrapped) -> list[list[str]]:
+    """Render the unwrapped env as a 2D list of cell symbols."""
+    grid_list = []
+    for j in range(env_unwrapped.height):
+        row = []
+        for i in range(env_unwrapped.width):
+            cell = env_unwrapped.grid.get(i, j)
+            if (i, j) == tuple(env_unwrapped.agent_pos):
+                row.append("A")
+            elif cell is None:
+                row.append("_")
+            elif cell.type == "wall":
+                row.append("#")
+            elif cell.type == "goal":
+                row.append("G")
+            elif cell.type == "ball":
+                row.append("C")
+            else:
+                row.append("?")
+        grid_list.append(row)
+    return grid_list
+
+
+def _reshuffle_walls(
+    layout: dict,
+    max_attempts: int = 200,
+) -> "CoinNavigationEnv | None":
+    """Generate a fresh maze with the same complexity but different wall layout.
+
+    Keeps agent start, goal, and coin positions fixed. On each attempt the maze
+    is regenerated randomly at the same complexity. When all anchors land on
+    naturally empty cells the maze is accepted immediately (complexity is
+    preserved exactly). If any anchor is walled off and retries are exhausted,
+    a fallback is applied: the conflicting anchor cells are forcibly cleared and
+    an equal number of non-anchor empty interior cells are re-walled, preserving
+    the total wall count.
+
+    Returns the configured (unwrapped) CoinNavigationEnv, or None if reachability
+    between all anchor positions could not be satisfied.
+    """
+    from collections import deque
+
+    size = layout["grid_size"]
+    complexity = layout["grid_complexity"]
+    start_pos = tuple(layout["agent_start_pos"])
+    goal_pos = tuple(layout["goal_pos"])
+    coin_pos = tuple(layout["coin_pos"]) if layout.get("coin_pos") else None
+    agent_dir = layout.get("agent_start_dir", 0)
+
+    anchor_positions: set[tuple[int, int]] = {start_pos, goal_pos}
+    if coin_pos is not None:
+        anchor_positions.add(coin_pos)
+
+    for attempt in range(max_attempts + 1):
+        is_fallback = attempt == max_attempts
+
+        env = CoinNavigationEnv(size=size, complexity=complexity)
+        env.reset()
+
+        # Remove the randomly-placed goal so only wall/empty structure remains.
+        if env.goal_pos is not None:
+            env.grid.set(*env.goal_pos, None)
+
+        # Identify anchor positions that the new maze walled off.
+        conflicting = [
+            pos for pos in anchor_positions
+            if env.grid.get(*pos) is not None and env.grid.get(*pos).type == "wall"
+        ]
+
+        if conflicting and not is_fallback:
+            continue  # Try a fresh maze
+
+        if conflicting:
+            # Fallback: clear conflicting anchors, compensate by re-walling an
+            # equal number of non-anchor empty interior cells (wall count preserved).
+            non_anchor_empty = [
+                (x, y)
+                for x in range(1, env.width - 1)
+                for y in range(1, env.height - 1)
+                if (x, y) not in anchor_positions and env.grid.get(x, y) is None
+            ]
+            random.shuffle(non_anchor_empty)
+            for pos in conflicting:
+                env.grid.set(*pos, None)
+            for pos in non_anchor_empty[: len(conflicting)]:
+                env.grid.set(*pos, Wall())
+
+        # BFS from start_pos — all other anchors must be reachable.
+        reachable: set[tuple[int, int]] = {start_pos}
+        queue: deque = deque([start_pos])
+        while queue:
+            x, y = queue.popleft()
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = x + dx, y + dy
+                if (nx, ny) in reachable or nx < 0 or ny < 0:
+                    continue
+                if nx >= env.width or ny >= env.height:
+                    continue
+                cell = env.grid.get(nx, ny)
+                if cell is None or cell.type != "wall":
+                    reachable.add((nx, ny))
+                    queue.append((nx, ny))
+
+        if not (anchor_positions - {start_pos}).issubset(reachable):
+            if is_fallback:
+                return None  # Reachability unresolvable
+            continue
+
+        # Place fixed objects.
+        env.put_obj(Goal(), *goal_pos)
+        env.goal_pos = goal_pos
+        env.agent_pos = np.array(start_pos)
+        env.agent_dir = agent_dir
+        env._initial_agent_pos = np.array(start_pos)
+        env._initial_agent_dir = agent_dir
+        if coin_pos is not None:
+            env.put_obj(Ball("yellow"), *coin_pos)
+
+        return env
+
+    return None  # Unreachable; loop above always returns on last iteration
 
 def get_trajectory(
     grid_size: int = 5,
@@ -1860,28 +1983,6 @@ def augment_from_layouts(
 
         return variants
 
-    def _env_to_grid_list(env_unwrapped) -> list[list[str]]:
-        """Render the unwrapped env as a 2D list of cell symbols."""
-        grid_list = []
-        for j in range(env_unwrapped.height):
-            row = []
-            for i in range(env_unwrapped.width):
-                cell = env_unwrapped.grid.get(i, j)
-                if (i, j) == tuple(env_unwrapped.agent_pos):
-                    row.append("A")
-                elif cell is None:
-                    row.append("_")
-                elif cell.type == "wall":
-                    row.append("#")
-                elif cell.type == "goal":
-                    row.append("G")
-                elif cell.type == "ball":
-                    row.append("C")
-                else:
-                    row.append("?")
-            grid_list.append(row)
-        return grid_list
-
     def _save_variant_layout(
         wrapped_env: FullObservabilityTextWrapper,
         original_layout: dict,
@@ -2047,6 +2148,236 @@ def augment_from_layouts(
                 hf_token=hf_token,
             )
     return None
+
+
+def reshuffle_walls_from_layouts(
+    layout_dir: str,
+    num_permutations: int = 5,
+    num_trajectories_per_permutation: int = 5,
+    max_attempts_per_permutation: int = 200,
+    max_steps_per_trajectory: int = 50,
+    max_tokens: int = 10000,
+    temperature: float = 0.7,
+    top_p: float = 0.95,
+    top_logprobs: int = 5,
+    reasoning_efforts: list[Literal["low", "medium", "high"]] = ["low"],
+    model_names: list[str] = ["together_ai/openai/gpt-oss-20b"],
+    observation_placeholders: list[str] = ["grid_state"],
+    output_dir: str = ".",
+    verbose: bool = False,
+    enable_dynamic_max_steps: bool = False,
+    max_workers: int | None = None,
+    enable_rate_limit: bool = False,
+    rate_limit: int = 1000,
+    rate_limit_period: float = 300.0,
+    template_name: str = "grid_full_observability_hidden_goals.j2",
+) -> None:
+    """Load existing coin layout JSONs and generate trajectories on wall-reshuffled variants.
+
+    For each ``*_layout.json`` file in ``layout_dir``, generates ``num_permutations``
+    structurally distinct mazes that share the same grid size, complexity, agent start,
+    goal, and coin positions but have different internal wall layouts. Trajectories are
+    then collected on each permuted layout.
+
+    Wall generation strategy:
+        Each permutation re-runs the randomised DFS maze generator at the original
+        complexity. If all anchor positions (start, goal, coin) land on naturally empty
+        cells the maze is used as-is (complexity preserved exactly). If any anchor is
+        walled off, the attempt is retried up to ``max_attempts_per_permutation`` times.
+        As a last resort a fallback is applied: conflicting anchor cells are cleared and
+        an equal number of non-anchor empty interior cells are re-walled so the total
+        wall count is preserved.
+
+    Args:
+        layout_dir: Directory containing ``*_layout.json`` files to permute.
+        num_permutations: Number of wall permutations to generate per layout.
+        num_trajectories_per_permutation: Trajectories per (permutation, model, effort).
+        max_attempts_per_permutation: Max maze regeneration attempts before the wall-count
+            fallback is applied.
+        max_steps_per_trajectory: Maximum steps per trajectory.
+        max_tokens: Maximum tokens per model generation step.
+        temperature: Sampling temperature.
+        top_p: Nucleus sampling parameter.
+        top_logprobs: Number of top log probabilities to return.
+        reasoning_efforts: List of reasoning effort levels.
+        model_names: List of model names in ``"provider/model_id"`` format.
+        observation_placeholders: Placeholder names in the prompt template.
+        output_dir: Directory to save output JSON files.
+        verbose: If True, print detailed logging.
+        enable_dynamic_max_steps: If True, override max_steps with 1.5× A* optimal length.
+        max_workers: Max parallel workers. Defaults to min(32, total_tasks).
+        enable_rate_limit: If True, enforce API rate limiting.
+        rate_limit: Max requests per rate_limit_period.
+        rate_limit_period: Rate limit window in seconds.
+        template_name: Jinja2 template filename.
+
+    Output filenames:
+        Layout JSONs:     ``{original_stem}_walls{N}_layout.json``
+        Trajectory JSONs: ``{original_stem}_walls{N}_{effort}_traj{traj_id}.json``
+    """
+    output_dir_path = Path(str(_resolve_output(output_dir)))
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    output_dir_str = str(output_dir_path)
+
+    layout_dir_path = Path(str(_resolve_output(layout_dir)))
+    layout_files = sorted(layout_dir_path.glob("*_layout.json"))
+    if not layout_files:
+        raise ValueError(f"No *_layout.json files found in {layout_dir_path}")
+
+    rate_limiter: RateLimiter | None = None
+    if enable_rate_limit:
+        rate_limiter = RateLimiter(rate_limit=rate_limit, period=rate_limit_period)
+
+    # Build all (wrapped_env, variant_name, original_stem, model_name) tasks.
+    variant_tasks: list[tuple] = []
+    all_layout_paths: list[str] = []
+
+    for layout_path in layout_files:
+        with open(layout_path) as f:
+            layout = json.load(f)
+        layout["_source_filename"] = layout_path.name
+        original_stem = layout_path.name.removesuffix("_layout.json")
+
+        for perm_idx in range(num_permutations):
+            variant_name = f"walls{perm_idx}"
+            env_unwrapped = _reshuffle_walls(layout, max_attempts=max_attempts_per_permutation)
+
+            if env_unwrapped is None:
+                logger.warning(
+                    f"Could not generate reachable wall permutation {perm_idx} "
+                    f"for {layout_path.name} — skipping."
+                )
+                continue
+
+            wrapped_env = FullObservabilityTextWrapper(env_unwrapped)
+
+            # Save layout JSON
+            coin_pos = find_coin_pos(env_unwrapped)
+            agent_pos = env_unwrapped.agent_pos
+            agent_start_pos = agent_pos.tolist() if hasattr(agent_pos, "tolist") else list(agent_pos)
+            if hasattr(env_unwrapped, "_initial_agent_pos") and env_unwrapped._initial_agent_pos is not None:
+                p = env_unwrapped._initial_agent_pos
+                agent_start_pos = p.tolist() if hasattr(p, "tolist") else list(p)
+
+            layout_data = {
+                "original_layout_file": layout.get("_source_filename", ""),
+                "variant": variant_name,
+                "permutation_index": perm_idx,
+                "grid_id": layout["grid_id"],
+                "grid_seed": layout["grid_seed"],
+                "grid_size": layout["grid_size"],
+                "grid_complexity": layout["grid_complexity"],
+                "grid_width": env_unwrapped.width,
+                "grid_height": env_unwrapped.height,
+                "target_dead_ends": layout.get("target_dead_ends"),
+                "actual_dead_ends": len(get_all_dead_ends(env_unwrapped)),
+                "place_at_dead_ends": layout.get("place_at_dead_ends", False),
+                "coin_placement": layout.get("coin_placement"),
+                "coin_pos": list(coin_pos) if coin_pos is not None else None,
+                "agent_start_pos": agent_start_pos,
+                "agent_start_dir": getattr(env_unwrapped, "_initial_agent_dir", env_unwrapped.agent_dir),
+                "goal_pos": list(env_unwrapped.goal_pos) if env_unwrapped.goal_pos is not None else None,
+                "grid_layout": _env_to_grid_list(env_unwrapped),
+                "grid_text": wrapped_env._render(),
+                "legend": wrapped_env.grid_cells,
+            }
+
+            layout_filename = f"{original_stem}_{variant_name}_layout.json"
+            layout_save_path = str(output_dir_path / layout_filename)
+            with open(layout_save_path, "w") as f:
+                json.dump(layout_data, f, indent=2)
+            all_layout_paths.append(layout_save_path)
+            if verbose:
+                logger.info(f"Saved reshuffled layout: {layout_filename}")
+
+            for model_name in model_names:
+                variant_tasks.append((wrapped_env, variant_name, original_stem, model_name))
+
+    total_variants = len(variant_tasks)
+    total_trajectories = total_variants * num_trajectories_per_permutation * len(reasoning_efforts)
+    logger.info(
+        f"Loaded {len(layout_files)} layout files; built {total_variants} wall permutations. "
+        f"Generating {total_trajectories} trajectories."
+    )
+
+    def _run_variant(task: tuple) -> dict:
+        wrapped_env, variant_name, original_stem, model_name = task
+        trajectory_results = []
+
+        for effort in reasoning_efforts:
+            for traj_id in range(num_trajectories_per_permutation):
+                if rate_limiter is not None:
+                    rate_limiter.acquire()
+
+                env_copy = copy.deepcopy(wrapped_env)
+                output_filename = f"{original_stem}_{variant_name}_{effort}_traj{traj_id}.json"
+                output_path = str(Path(output_dir_str) / output_filename)
+
+                if verbose:
+                    logger.info(
+                        f"Starting trajectory: variant={variant_name}, model={model_name}, "
+                        f"effort={effort}, traj={traj_id}"
+                    )
+
+                try:
+                    get_trajectory(
+                        max_steps_per_trajectory=max_steps_per_trajectory,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
+                        top_logprobs=top_logprobs,
+                        seed=traj_id,
+                        reasoning_effort=effort,
+                        model_name=model_name,
+                        observation_placeholders=observation_placeholders,
+                        output_path=output_path,
+                        verbose=verbose,
+                        enable_dynamic_max_steps=enable_dynamic_max_steps,
+                        env=env_copy,
+                        use_safe_reset=True,
+                        transform_type=variant_name,
+                        template_name=template_name,
+                    )
+                    trajectory_results.append({"status": "success", "output_path": output_path})
+                except Exception as e:
+                    logger.error(
+                        f"Failed: variant={variant_name}, effort={effort}, traj={traj_id}: {e}"
+                    )
+                    trajectory_results.append(
+                        {"status": "error", "error": str(e), "output_path": output_path}
+                    )
+
+        return {"trajectory_results": trajectory_results}
+
+    effective_workers = max_workers if max_workers is not None else min(32, total_variants)
+    all_trajectory_results: list[dict] = []
+
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        futures = {executor.submit(_run_variant, task): task for task in variant_tasks}
+        for future in tqdm(
+            as_completed(futures),
+            total=total_variants,
+            desc="Reshuffling walls",
+            unit="variant",
+        ):
+            task = futures[future]
+            try:
+                result = future.result()
+                all_trajectory_results.extend(result["trajectory_results"])
+                failures = [r for r in result["trajectory_results"] if r["status"] != "success"]
+                for failure in failures:
+                    tqdm.write(
+                        f"Failed for variant {task[1]}: {failure.get('error', 'Unknown error')}"
+                    )
+            except Exception as e:
+                tqdm.write(f"Exception for variant {task[1]}: {e}")
+                all_trajectory_results.append({"status": "error", "error": str(e)})
+
+    success_count = sum(1 for r in all_trajectory_results if r["status"] == "success")
+    logger.info(
+        f"Completed {success_count}/{total_trajectories} reshuffled-wall trajectories successfully. "
+        f"Saved {len(all_layout_paths)} permuted layout files."
+    )
 
 
 def upload_trajectories_dir(

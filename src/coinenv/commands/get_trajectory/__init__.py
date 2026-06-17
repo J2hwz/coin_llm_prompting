@@ -5,6 +5,7 @@ from .get_trajectory_fn import (
     get_trajectory,
     get_single_trajectory_coin_env,
     get_multiple_trajectories_coin_env,
+    reshuffle_walls_from_layouts,
     upload_trajectories_dir,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "get_single_trajectory_coin_env",
     "get_multiple_trajectories_coin_env",
     "augment_from_layouts",
+    "reshuffle_walls_from_layouts",
     "upload_trajectories_dir",
 ]

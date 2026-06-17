@@ -410,6 +410,20 @@ def generate_trajectory(
             carrying_key = base_env.carrying.type == "key"
         metadata["carrying_key"] = carrying_key
 
+        if action == -1:
+            # LLM returned an unparseable action — record the step and skip env.step
+            steps.append(
+                Step(
+                    observation=str(observation),
+                    action=action,
+                    reward=0.0,
+                    metadata=metadata,
+                    note=None,
+                )
+            )
+            step_count += 1
+            continue
+
         next_obs, reward, terminated, truncated, info = env.step(action)
         total_reward += float(reward)
         if "coin_collected" in info:
