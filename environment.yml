@@ -29,4 +29,5 @@ dependencies:
     - tyro>=0.10.0a6
     - transformers>=4.57.3
     - huggingface_hub>=0.25.0
+    - torch>=2.0.0
     - -e .

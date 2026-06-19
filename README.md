@@ -44,6 +44,16 @@ Do not commit this file — it is already in `.gitignore`.
 ## Repository structure
 
 ```
+├── algorithms/                      # Subgoal inference algorithms (IRL-based)
+│   ├── run_algorithms.py            # Entry point — orchestrates all algorithms, plots, CSV
+│   ├── run_trex.py                  # T-REX reward learning entry point
+│   ├── visit_frequency.py           # Baseline: most-visited cell
+│   ├── surprise_v2.py               # Surprise model (terminal-directed)
+│   ├── inv_planning.py              # Bayesian inverse planning
+│   ├── bnirl.py                     # BNIRL Gibbs sampler
+│   ├── birl_wrapper.py              # BIRL PolicyWalk MCMC
+│   ├── maxent_irl.py                # Maximum Causal Entropy IRL
+│   └── trex.py                      # T-REX neural reward learning (requires torch)
 ├── analysis/                        # Offline analysis scripts
 │   ├── metrics.py                   # Pure math: entropy, JSD, KL, calibration, stats
 │   ├── visualization.py             # Shared matplotlib helpers (paper-quality figures)
@@ -131,10 +141,9 @@ The maze is generated fresh at the start of each trajectory and not stored befor
 | Template | Used for |
 |---|---|
 | `grid_full_observability.j2` | Full observability, standard navigation |
+| `grid_full_observability_hidden_goals.j2` | Full observability with coin — agent must collect coin then reach goal |
 | `grid_partial_observability.j2` | Partial observability with action history |
 | `grid_partial_observability_with_note.j2` | Partial obs + agent note-taking |
-| `grid_full_observability_coin.j2` | Coin collection variant |
-| `grid_full_observability_instrumental_goals.j2` | Multi-goal variant |
 
 Agent variants:
 
@@ -221,6 +230,18 @@ Each trajectory is saved as a JSON file:
 ```
 
 Token-level logprobs are stored per step for downstream mechanistic interpretability analysis.
+
+---
+
+## Subgoal inference algorithms
+
+The `algorithms/` package infers which intermediate cell an agent was heading toward (before the terminal goal), given observed navigation trajectories and a grid layout. Six methods are implemented: visit frequency baseline, surprise model, Bayesian inverse planning, BNIRL, BIRL, and maximum causal entropy IRL. T-REX (neural reward learning) is also included and requires PyTorch.
+
+```bash
+python algorithms/run_algorithms.py <data_dir> [--mode {individual,pooled,both}]
+```
+
+See [`algorithms/algorithms.md`](algorithms/algorithms.md) for full documentation, input format, and output schema. The algorithms are compatible with output from `get_multiple_trajectories_coin_env`.
 
 ---
 
