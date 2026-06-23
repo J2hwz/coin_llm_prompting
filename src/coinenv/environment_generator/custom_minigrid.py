@@ -155,11 +155,17 @@ class Simple2DNavigationEnv(MiniGridEnv):
             for y in range(1, height - 1)
             if self.grid.get(x, y) is None
             and sum(
-                1 for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]
+                1
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]
                 if self.grid.get(x + dx, y + dy) is not None
-            ) == 3
+            )
+            == 3
         ]
-        candidate_cells = dead_ends if (self.place_at_dead_ends and len(dead_ends) >= 2) else empty_cells
+        candidate_cells = (
+            dead_ends
+            if (self.place_at_dead_ends and len(dead_ends) >= 2)
+            else empty_cells
+        )
 
         # Place Goal
         self.goal_pos = (
@@ -373,7 +379,13 @@ class CoinNavigationEnv(Simple2DNavigationEnv):
         ):
             terminated = True
             obs = self.gen_obs()
-            return obs, reward, terminated, truncated, {"coin_collected": self.coin_collected}
+            return (
+                obs,
+                reward,
+                terminated,
+                truncated,
+                {"coin_collected": self.coin_collected},
+            )
 
         # Set agent direction
         if action in self._action_to_direction:
@@ -390,7 +402,11 @@ class CoinNavigationEnv(Simple2DNavigationEnv):
 
         # Collect coin if agent is now on a ball cell
         current_cell = self.grid.get(*self.agent_pos)
-        if current_cell is not None and current_cell.type == "ball" and not self.coin_collected:
+        if (
+            current_cell is not None
+            and current_cell.type == "ball"
+            and not self.coin_collected
+        ):
             self.coin_collected = True
             self.grid.set(*self.agent_pos, None)
 
@@ -403,7 +419,89 @@ class CoinNavigationEnv(Simple2DNavigationEnv):
             truncated = True
 
         obs = self.gen_obs()
-        return obs, reward, terminated, truncated, {"coin_collected": self.coin_collected}
+        return (
+            obs,
+            reward,
+            terminated,
+            truncated,
+            {"coin_collected": self.coin_collected},
+        )
+
+
+class TwoCoinNavigationEnv(Simple2DNavigationEnv):
+    """Simple2DNavigationEnv with two-coin collection mechanics.
+
+    Identical to CoinNavigationEnv except:
+    - Tracks coins_collected: int (0, 1, or 2) instead of a single boolean.
+    - Walking onto any Ball cell increments the counter and removes that coin from
+      the grid, so both coins can be collected independently in the same episode.
+    - Each step returns {"coins_collected": int} in the info dict.
+
+    Neither coin is placed by this class — place them externally using put_obj()
+    after reset(), as done in the two-coin trajectory generation commands.
+    """
+
+    def _gen_grid(self, width, height):
+        super()._gen_grid(width, height)
+        self.coins_collected = 0
+
+    def safe_reset(self):
+        obs, info = super().safe_reset()
+        self.coins_collected = 0
+        return obs, info
+
+    def step(self, action):
+        self.step_count += 1
+        reward = 0
+        terminated = False
+        truncated = False
+
+        if (
+            hasattr(self, "allow_quit_action")
+            and self.allow_quit_action
+            and action == self.ExtendedActions.QUIT
+        ):
+            terminated = True
+            obs = self.gen_obs()
+            return (
+                obs,
+                reward,
+                terminated,
+                truncated,
+                {"coins_collected": self.coins_collected},
+            )
+
+        if action in self._action_to_direction:
+            self.agent_dir = self._action_to_direction[action]
+        else:
+            raise ValueError(f"Unknown action: {action}")
+
+        fwd_pos = self.front_pos
+        fwd_cell = self.grid.get(*fwd_pos)
+
+        if fwd_cell is None or fwd_cell.can_overlap() or fwd_cell.type == "ball":
+            self.agent_pos = tuple(fwd_pos)
+
+        current_cell = self.grid.get(*self.agent_pos)
+        if current_cell is not None and current_cell.type == "ball":
+            self.coins_collected += 1
+            self.grid.set(*self.agent_pos, None)
+
+        if self.agent_pos == self.goal_pos:
+            terminated = True
+            reward = self._reward()
+
+        if self.step_count >= self.max_steps:
+            truncated = True
+
+        obs = self.gen_obs()
+        return (
+            obs,
+            reward,
+            terminated,
+            truncated,
+            {"coins_collected": self.coins_collected},
+        )
 
 
 if __name__ == "__main__":

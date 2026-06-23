@@ -29,14 +29,23 @@ from coinenv.commands.get_trajectory.get_trajectory_utils import (
 from coinenv.commands.get_trajectory.rate_limiter import (
     RateLimiter,
 )
-from coinenv.environment_generator.custom_minigrid import CoinNavigationEnv, Simple2DNavigationEnv
+from coinenv.environment_generator.custom_minigrid import (
+    CoinNavigationEnv,
+    Simple2DNavigationEnv,
+    TwoCoinNavigationEnv,
+)
 from coinenv.environment_generator.env_transformations import (
     ReflectEnv,
     RotateEnv,
     StartGoalSwap,
     TransposeEnv,
 )
-from coinenv.environment_generator.utils import clone_env, find_coin_pos, get_all_dead_ends, manhattan_distance
+from coinenv.environment_generator.utils import (
+    clone_env,
+    find_coin_pos,
+    get_all_dead_ends,
+    manhattan_distance,
+)
 from coinenv.environment_generator.wrappers.text_obs_wrapper import (
     FullObservabilityTextWrapper,
 )
@@ -119,7 +128,8 @@ def _reshuffle_walls(
 
         # Identify anchor positions that the new maze walled off.
         conflicting = [
-            pos for pos in anchor_positions
+            pos
+            for pos in anchor_positions
             if env.grid.get(*pos) is not None and env.grid.get(*pos).type == "wall"
         ]
 
@@ -175,6 +185,7 @@ def _reshuffle_walls(
         return env
 
     return None  # Unreachable; loop above always returns on last iteration
+
 
 def get_trajectory(
     grid_size: int = 5,
@@ -267,7 +278,9 @@ def get_trajectory(
         grid_complexity = base_env.unwrapped.complexity
 
     if template_name is not None:
-        template_path = Path(__file__).parent.parent.parent / "templates" / template_name
+        template_path = (
+            Path(__file__).parent.parent.parent / "templates" / template_name
+        )
         agent = LLMAgent(model_name=model_name, template_path=template_path)
     else:
         agent = LLMAgent(model_name)
@@ -617,6 +630,7 @@ def get_trajectories(
             hf_token=hf_token,
         )
     return None
+
 
 def get_trajectories_multiple_per_grid(
     grid_sizes: list[int] = [5],
@@ -1181,7 +1195,10 @@ def get_single_trajectory_coin_env(
         candidate.reset()
 
         # Reject grids that don't meet the dead-end count requirement
-        if target_dead_ends is not None and len(get_all_dead_ends(candidate)) != target_dead_ends:
+        if (
+            target_dead_ends is not None
+            and len(get_all_dead_ends(candidate)) != target_dead_ends
+        ):
             candidate.close()
             continue
 
@@ -1202,11 +1219,14 @@ def get_single_trajectory_coin_env(
             # Prefer dead-end cells; fall back to random if none available
             if effective_placement == "dead_end":
                 raw = [
-                    (x, y) for (x, y) in get_all_dead_ends(candidate)
+                    (x, y)
+                    for (x, y) in get_all_dead_ends(candidate)
                     if (x, y) not in excluded
                 ]
                 if not raw:
-                    logger.warning("No valid dead end for coin placement; falling back to random.")
+                    logger.warning(
+                        "No valid dead end for coin placement; falling back to random."
+                    )
                     effective_placement = "random"
             if effective_placement == "random":
                 raw = [
@@ -1218,7 +1238,8 @@ def get_single_trajectory_coin_env(
 
             # Filter to positions that are far enough from both start and goal
             valid = [
-                p for p in raw
+                p
+                for p in raw
                 if manhattan_distance(start, p) >= min_manhattan_distance
                 and manhattan_distance(goal, p) >= min_manhattan_distance
             ]
@@ -1281,7 +1302,9 @@ def get_single_trajectory_coin_env(
     grid_params["coin_pos"] = list(coin_pos) if coin_pos is not None else None
     grid_params["fully_observable"] = True
     grid_params["astar_distance"] = traj.traj_metadata["astar_distance"]
-    grid_params["agent_start_coordinates"] = traj.traj_metadata["agent_start_coordinates"]
+    grid_params["agent_start_coordinates"] = traj.traj_metadata[
+        "agent_start_coordinates"
+    ]
     grid_params["goal_coordinates"] = traj.traj_metadata["goal_coordinates"]
     grid_params["legend"] = base_env.grid_cells
 
@@ -1328,7 +1351,9 @@ def get_single_trajectory_coin_env(
     prompt["prompt_placeholder_n_tokens"] = len(prompt["prompt_placeholder_tokens"])
     prompt["prompt_suffix_tokens"] = to_dic_list(suffix, tokenizer)
     raw_suffix_tokens = to_dic_list(raw_suffix, tokenizer)
-    start_raw_suffix_idx = len(prompt["prompt_suffix_tokens"]) - len(raw_suffix_tokens) + 1
+    start_raw_suffix_idx = (
+        len(prompt["prompt_suffix_tokens"]) - len(raw_suffix_tokens) + 1
+    )
     for i in range(
         len(prompt["prompt_suffix_tokens"]) - start_raw_suffix_idx,
         len(prompt["prompt_suffix_tokens"]) - 1,
@@ -1362,7 +1387,9 @@ def get_single_trajectory_coin_env(
             step_dic["output_text"], tokenizer, groups=["output"]
         )
         step_dic["output_n_tokens"] = len(step_dic["output_tokens"])
-        step_dic["output_tokens"] = annotate_output_tokens(model_name, step_dic["output_tokens"])
+        step_dic["output_tokens"] = annotate_output_tokens(
+            model_name, step_dic["output_tokens"]
+        )
 
         api_logprobs = traj_step.metadata["logprobs"]
         for i, t in enumerate(step_dic["output_tokens"]):
@@ -1372,7 +1399,9 @@ def get_single_trajectory_coin_env(
                 continue
             curr_probs = {}
             for logprob_dic in api_logprobs[i]["top_logprobs"]:
-                curr_probs[logprob_dic["token"]] = np.round(np.exp(logprob_dic["logprob"]), 4)
+                curr_probs[logprob_dic["token"]] = np.round(
+                    np.exp(logprob_dic["logprob"]), 4
+                )
             step_dic["output_tokens"][i]["probabilities"] = curr_probs
 
         steps.append(step_dic)
@@ -1486,7 +1515,9 @@ def get_multiple_trajectories_coin_env(
     )
 
     total_grid_tasks = len(grid_configs)
-    total_trajectories = total_grid_tasks * num_trajectories_per_grid * len(reasoning_efforts)
+    total_trajectories = (
+        total_grid_tasks * num_trajectories_per_grid * len(reasoning_efforts)
+    )
 
     logger.info(
         f"Generating {total_trajectories} coin-env trajectories across {len(grid_sizes)} "
@@ -1527,7 +1558,10 @@ def get_multiple_trajectories_coin_env(
             candidate.reset()
 
             # Reject grids that don't meet the dead-end count requirement
-            if target_dead_ends is not None and len(get_all_dead_ends(candidate)) != target_dead_ends:
+            if (
+                target_dead_ends is not None
+                and len(get_all_dead_ends(candidate)) != target_dead_ends
+            ):
                 candidate.close()
                 continue
 
@@ -1548,11 +1582,14 @@ def get_multiple_trajectories_coin_env(
                 # Prefer dead-end cells; fall back to random if none available
                 if effective_placement == "dead_end":
                     raw = [
-                        (x, y) for (x, y) in get_all_dead_ends(candidate)
+                        (x, y)
+                        for (x, y) in get_all_dead_ends(candidate)
                         if (x, y) not in excluded
                     ]
                     if not raw:
-                        logger.warning("No valid dead end for coin placement; falling back to random.")
+                        logger.warning(
+                            "No valid dead end for coin placement; falling back to random."
+                        )
                         effective_placement = "random"
                 if effective_placement == "random":
                     raw = [
@@ -1564,7 +1601,8 @@ def get_multiple_trajectories_coin_env(
 
                 # Filter to positions that are far enough from both start and goal
                 valid = [
-                    p for p in raw
+                    p
+                    for p in raw
                     if manhattan_distance(start, p) >= min_manhattan_distance
                     and manhattan_distance(goal, p) >= min_manhattan_distance
                 ]
@@ -1589,7 +1627,11 @@ def get_multiple_trajectories_coin_env(
             )
 
         actual_dead_ends = len(get_all_dead_ends(base_env_unwrapped))
-        return FullObservabilityTextWrapper(base_env_unwrapped), coin_pos, actual_dead_ends
+        return (
+            FullObservabilityTextWrapper(base_env_unwrapped),
+            coin_pos,
+            actual_dead_ends,
+        )
 
     def _save_coin_grid_layout(
         env: FullObservabilityTextWrapper,
@@ -1623,8 +1665,13 @@ def get_multiple_trajectories_coin_env(
             grid_list.append(row)
 
         agent_pos = unwrapped.agent_pos
-        agent_start_pos = agent_pos.tolist() if hasattr(agent_pos, "tolist") else list(agent_pos)
-        if hasattr(unwrapped, "_initial_agent_pos") and unwrapped._initial_agent_pos is not None:
+        agent_start_pos = (
+            agent_pos.tolist() if hasattr(agent_pos, "tolist") else list(agent_pos)
+        )
+        if (
+            hasattr(unwrapped, "_initial_agent_pos")
+            and unwrapped._initial_agent_pos is not None
+        ):
             p = unwrapped._initial_agent_pos
             agent_start_pos = p.tolist() if hasattr(p, "tolist") else list(p)
 
@@ -1668,7 +1715,9 @@ def get_multiple_trajectories_coin_env(
         grid_seed = seed + grid_id
         model_sanitized = model_name.replace("/", "_").replace(".", "_")
 
-        master_env, coin_pos, actual_dead_ends = _build_coin_env(grid_size, grid_complexity, grid_seed)
+        master_env, coin_pos, actual_dead_ends = _build_coin_env(
+            grid_size, grid_complexity, grid_seed
+        )
 
         grid_path = _save_coin_grid_layout(
             env=master_env,
@@ -1720,20 +1769,38 @@ def get_multiple_trajectories_coin_env(
                     use_safe_reset=True,
                     template_name=template_name,
                 )
-                return {"status": "success", "output_path": output_path, "config": config, "traj_id": traj_id, "effort": effort}
+                return {
+                    "status": "success",
+                    "output_path": output_path,
+                    "config": config,
+                    "traj_id": traj_id,
+                    "effort": effort,
+                }
             except Exception as e:
-                logger.error(f"Failed coin trajectory grid={grid_id}, effort={effort}, traj={traj_id}: {e}")
-                return {"status": "error", "error": str(e), "config": config, "traj_id": traj_id, "effort": effort}
+                logger.error(
+                    f"Failed coin trajectory grid={grid_id}, effort={effort}, traj={traj_id}: {e}"
+                )
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "config": config,
+                    "traj_id": traj_id,
+                    "effort": effort,
+                }
 
         inner_workers = (
-            max_workers_per_grid if max_workers_per_grid is not None
+            max_workers_per_grid
+            if max_workers_per_grid is not None
             else num_trajectories_per_grid * len(reasoning_efforts)
         )
         trajectory_results = []
 
         with ThreadPoolExecutor(max_workers=inner_workers) as inner_executor:
             futures = {
-                inner_executor.submit(_generate_single_trajectory, traj_id, effort): (traj_id, effort)
+                inner_executor.submit(_generate_single_trajectory, traj_id, effort): (
+                    traj_id,
+                    effort,
+                )
                 for effort in reasoning_efforts
                 for traj_id in range(num_trajectories_per_grid)
             }
@@ -1742,9 +1809,17 @@ def get_multiple_trajectories_coin_env(
                 try:
                     trajectory_results.append(future.result())
                 except Exception as e:
-                    logger.error(f"Exception for grid {grid_id}, effort {effort}, traj {traj_id}: {e}")
+                    logger.error(
+                        f"Exception for grid {grid_id}, effort {effort}, traj {traj_id}: {e}"
+                    )
                     trajectory_results.append(
-                        {"status": "error", "error": str(e), "config": config, "traj_id": traj_id, "effort": effort}
+                        {
+                            "status": "error",
+                            "error": str(e),
+                            "config": config,
+                            "traj_id": traj_id,
+                            "effort": effort,
+                        }
                     )
 
         return {"trajectory_results": trajectory_results, "grid_paths": [grid_path]}
@@ -1780,7 +1855,9 @@ def get_multiple_trajectories_coin_env(
                 result = future.result()
                 all_trajectory_results.extend(result["trajectory_results"])
                 all_grid_paths.extend(result["grid_paths"])
-                failures = [r for r in result["trajectory_results"] if r["status"] != "success"]
+                failures = [
+                    r for r in result["trajectory_results"] if r["status"] != "success"
+                ]
                 for failure in failures:
                     tqdm.write(
                         f"Failed for grid {config}, traj {failure['traj_id']}: "
@@ -1790,11 +1867,809 @@ def get_multiple_trajectories_coin_env(
                 tqdm.write(f"Exception for grid {config}: {e}")
                 for traj_id in range(num_trajectories_per_grid):
                     all_trajectory_results.append(
-                        {"status": "error", "error": str(e), "config": config, "traj_id": traj_id}
+                        {
+                            "status": "error",
+                            "error": str(e),
+                            "config": config,
+                            "traj_id": traj_id,
+                        }
                     )
 
     success_count = sum(1 for r in all_trajectory_results if r["status"] == "success")
-    logger.info(f"Completed {success_count}/{total_trajectories} coin-env trajectories successfully.")
+    logger.info(
+        f"Completed {success_count}/{total_trajectories} coin-env trajectories successfully."
+    )
+    logger.info(f"Saved {len(all_grid_paths)} grid layout files.")
+
+    if hf_repo_id is not None and (success_count > 0 or all_grid_paths):
+        all_paths_to_upload = [
+            r["output_path"] for r in all_trajectory_results if r["status"] == "success"
+        ]
+        all_paths_to_upload.extend(all_grid_paths)
+        if all_paths_to_upload:
+            return upload_files_to_huggingface(
+                file_paths=all_paths_to_upload,
+                repo_id=hf_repo_id,
+                path_prefix=hf_path_prefix,
+                hf_token=hf_token,
+            )
+    return None
+
+
+def get_single_trajectory_two_coin_env(
+    grid_size: int = 11,
+    grid_complexity: float = 0.8,
+    target_dead_ends: int | None = None,
+    place_at_dead_ends: bool = False,
+    coin_placement: Literal["random", "dead_end"] = "random",
+    max_attempts: int = 1000,
+    min_manhattan_distance: int = 3,
+    max_steps_per_trajectory: int = 50,
+    max_tokens: int = 10000,
+    temperature: float = 0.7,
+    top_p: float = 0.95,
+    top_logprobs: int = 5,
+    seed: int = 42,
+    reasoning_effort: Literal["low", "medium", "high"] = "low",
+    model_name: str = "together_ai/openai/gpt-oss-20b",
+    template_name: str = "grid_full_observability_two_coins_collect_one.j2",
+    observation_placeholders: list[str] = ["grid_state"],
+    output_path: str = "get_trajectory_two_coin_example_output.json",
+    verbose: bool = False,
+    enable_dynamic_max_steps: bool = False,
+):
+    """Generate an agent trajectory in a two-coin navigation environment and save results to JSON.
+
+    Creates a TwoCoinNavigationEnv with two coins placed according to coin_placement, with
+    minimum Manhattan distance constraints between start, goal, and both coins. Environments
+    are retried up to max_attempts until all constraints are satisfied.
+
+    Two coins are always placed. The template_name parameter controls what objective the agent
+    is given — use grid_full_observability_two_coins_collect_one.j2 to instruct the agent to
+    collect exactly one coin, or grid_full_observability_two_coins_collect_all.j2 to collect
+    both. The avoid-coin template can also be used (grid_full_observability_avoid_coin.j2).
+
+    Args:
+        grid_size: Size of the square grid environment.
+        grid_complexity: Complexity level of the grid (0.0 = open room, 1.0 = perfect maze).
+        target_dead_ends: Exact number of dead ends required. If None, no constraint.
+        place_at_dead_ends: If True, place agent start and goal at dead-end cells.
+        coin_placement: Strategy for placing each coin: "random" = any open cell;
+            "dead_end" = dead-end cell (falls back to random if insufficient dead ends).
+        max_attempts: Maximum generation attempts.
+        min_manhattan_distance: Minimum pairwise Manhattan distance required between agent
+            start, goal, and both coin positions.
+        max_steps_per_trajectory: Maximum steps per trajectory.
+        max_tokens: Maximum tokens per model generation step.
+        temperature: Sampling temperature.
+        top_p: Nucleus sampling parameter.
+        top_logprobs: Number of top log probabilities to return per token.
+        seed: Random seed for reproducibility.
+        reasoning_effort: Reasoning effort level ("low", "medium", or "high").
+        model_name: Model name in "provider/model_id" format.
+        template_name: Jinja2 template to use. Determines the agent's coin objective.
+        observation_placeholders: Placeholder names in the prompt template.
+        output_path: Path to save the output JSON file.
+        verbose: If True, print detailed logging.
+        enable_dynamic_max_steps: If True, override max_steps_per_trajectory with 1.5×
+            the A* optimal path length.
+
+    Returns:
+        None. Results are saved to output_path.
+    """
+    output_path = str(_resolve_output(output_path))
+
+    base_env_unwrapped = None
+    coin1_pos = None
+    coin2_pos = None
+
+    np.random.seed(seed)
+
+    for _ in range(max_attempts):
+        candidate = TwoCoinNavigationEnv(
+            size=grid_size,
+            complexity=grid_complexity,
+            place_at_dead_ends=place_at_dead_ends,
+        )
+        candidate.reset()
+
+        if (
+            target_dead_ends is not None
+            and len(get_all_dead_ends(candidate)) != target_dead_ends
+        ):
+            candidate.close()
+            continue
+
+        start = tuple(candidate.agent_pos)
+        goal = tuple(candidate.goal_pos)
+
+        if manhattan_distance(start, goal) < min_manhattan_distance:
+            candidate.close()
+            continue
+
+        excluded = {start, goal}
+        effective_placement = coin_placement
+
+        if effective_placement == "dead_end":
+            raw = [
+                (x, y)
+                for (x, y) in get_all_dead_ends(candidate)
+                if (x, y) not in excluded
+            ]
+            if len(raw) < 2:
+                logger.warning(
+                    "Fewer than 2 dead ends for two-coin placement; falling back to random."
+                )
+                effective_placement = "random"
+        if effective_placement == "random":
+            raw = [
+                (x, y)
+                for x in range(1, candidate.width - 1)
+                for y in range(1, candidate.height - 1)
+                if candidate.grid.get(x, y) is None and (x, y) not in excluded
+            ]
+
+        valid_1 = [
+            p
+            for p in raw
+            if manhattan_distance(start, p) >= min_manhattan_distance
+            and manhattan_distance(goal, p) >= min_manhattan_distance
+        ]
+        if not valid_1:
+            candidate.close()
+            continue
+
+        resolved_coin1_pos = random.choice(valid_1)
+        excluded.add(resolved_coin1_pos)
+
+        valid_2 = [
+            p
+            for p in raw
+            if p not in excluded
+            and manhattan_distance(start, p) >= min_manhattan_distance
+            and manhattan_distance(goal, p) >= min_manhattan_distance
+            and manhattan_distance(resolved_coin1_pos, p) >= min_manhattan_distance
+        ]
+        if not valid_2:
+            candidate.close()
+            continue
+
+        resolved_coin2_pos = random.choice(valid_2)
+        candidate.put_obj(Ball("yellow"), *resolved_coin1_pos)
+        candidate.put_obj(Ball("yellow"), *resolved_coin2_pos)
+
+        base_env_unwrapped = candidate
+        coin1_pos = resolved_coin1_pos
+        coin2_pos = resolved_coin2_pos
+        break
+
+    if base_env_unwrapped is None:
+        raise RuntimeError(
+            f"Could not generate a two-coin environment satisfying all constraints after {max_attempts} "
+            f"attempts (size={grid_size}, complexity={grid_complexity}, "
+            f"target_dead_ends={target_dead_ends}, min_manhattan_distance={min_manhattan_distance})."
+        )
+
+    actual_dead_ends = len(get_all_dead_ends(base_env_unwrapped))
+    base_env = FullObservabilityTextWrapper(base_env_unwrapped)
+
+    template_path = Path(__file__).parent.parent.parent / "templates" / template_name
+    agent = LLMAgent(model_name=model_name, template_path=template_path)
+    model_id = "/".join(model_name.split("/")[1:])
+    provider = model_name.split("/")[0]
+    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
+
+    traj = generate_trajectory(
+        env=base_env,
+        agent=agent,
+        max_steps_per_trajectory=max_steps_per_trajectory,
+        generation_kwargs={
+            "top_logprobs": top_logprobs,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "reasoning_effort": reasoning_effort,
+            "seed": seed,
+        },
+        verbose=verbose,
+        enable_dynamic_max_steps=enable_dynamic_max_steps,
+        skip_reset=True,
+    )
+
+    grid_params = {}
+    grid_params["grid_width"] = base_env_unwrapped.width
+    grid_params["grid_height"] = base_env_unwrapped.height
+    grid_params["grid_complexity"] = grid_complexity
+    grid_params["target_dead_ends"] = target_dead_ends
+    grid_params["actual_dead_ends"] = actual_dead_ends
+    grid_params["place_at_dead_ends"] = place_at_dead_ends
+    grid_params["coin_placement"] = coin_placement
+    grid_params["coin_pos_1"] = list(coin1_pos)
+    grid_params["coin_pos_2"] = list(coin2_pos)
+    grid_params["fully_observable"] = True
+    grid_params["astar_distance"] = traj.traj_metadata["astar_distance"]
+    grid_params["agent_start_coordinates"] = traj.traj_metadata[
+        "agent_start_coordinates"
+    ]
+    grid_params["goal_coordinates"] = traj.traj_metadata["goal_coordinates"]
+    grid_params["legend"] = base_env.grid_cells
+
+    grid_symbols = [cell["symbol"] for cell in base_env.grid_cells.values()]
+
+    model_params = {}
+    model_params["model_id"] = model_id
+    model_params["provider"] = provider
+    model_params["interface"] = "litellm"
+    model_params["template_name"] = template_name
+    model_params["n_interactions_in_context"] = 0
+    model_params["max_tokens"] = max_tokens
+    model_params["max_steps_per_trajectory"] = max_steps_per_trajectory
+    model_params["temperature"] = temperature
+    model_params["reasoning_effort"] = reasoning_effort
+    model_params["top_p"] = top_p
+    model_params["top_logprobs"] = top_logprobs
+    model_params["seed"] = seed
+
+    prompt = {}
+    render_kwargs = {"grid_state": "{{grid_state}}"}
+    template = agent._template.render(**render_kwargs)
+    formatted_template: str = tokenizer.apply_chat_template(
+        [{"role": "user", "content": template}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    template_tokens = to_dic_list(formatted_template, tokenizer)
+
+    observation_placeholder = "{{" + observation_placeholders[0] + "}}"
+    prefix, suffix = formatted_template.split(observation_placeholder)
+    raw_prefix, raw_suffix = template.split(observation_placeholder)
+    prompt["prompt_template"] = formatted_template
+    prompt["prompt_template_n_tokens"] = len(template_tokens)
+    prompt["prompt_prefix_tokens"] = to_dic_list(prefix, tokenizer)
+    raw_prefix_tokens = to_dic_list(raw_prefix, tokenizer)
+    start_raw_prefix_idx = len(prompt["prompt_prefix_tokens"]) - len(raw_prefix_tokens)
+    for i in range(start_raw_prefix_idx):
+        prompt["prompt_prefix_tokens"][i]["token_groups"] += ["template"]
+    prompt["prompt_prefix_n_tokens"] = len(prompt["prompt_prefix_tokens"])
+    prompt["prompt_placeholder_tokens"] = to_dic_list(
+        observation_placeholder, tokenizer, groups=["prompt", "placeholder"]
+    )
+    prompt["prompt_placeholder_n_tokens"] = len(prompt["prompt_placeholder_tokens"])
+    prompt["prompt_suffix_tokens"] = to_dic_list(suffix, tokenizer)
+    raw_suffix_tokens = to_dic_list(raw_suffix, tokenizer)
+    start_raw_suffix_idx = (
+        len(prompt["prompt_suffix_tokens"]) - len(raw_suffix_tokens) + 1
+    )
+    for i in range(
+        len(prompt["prompt_suffix_tokens"]) - start_raw_suffix_idx,
+        len(prompt["prompt_suffix_tokens"]) - 1,
+    ):
+        prompt["prompt_suffix_tokens"][i]["token_groups"] += ["template"]
+    prompt["prompt_suffix_n_tokens"] = len(prompt["prompt_suffix_tokens"])
+
+    steps = []
+    for step_id, traj_step in enumerate(traj.steps):
+        step_dic = {}
+        step_dic["step_id"] = step_id
+        step_dic["grid_state"] = traj_step.observation.split("\n")
+        step_dic["grid_state_tokens"] = to_dic_list(
+            traj_step.observation, tokenizer, groups=["prompt", "grid_state"]
+        )
+        step_dic["grid_state_n_tokens"] = len(step_dic["grid_state_tokens"])
+
+        for i, t in enumerate(step_dic["grid_state_tokens"]):
+            if any(sym in t["token"] for sym in grid_symbols):
+                step_dic["grid_state_tokens"][i]["token_groups"] += ["grid_tile"]
+
+        step_dic["prompt_suffix_tokens"] = prompt["prompt_suffix_tokens"]
+        step_dic["prompt_suffix_n_tokens"] = len(step_dic["prompt_suffix_tokens"])
+        step_dic["agent_action"] = traj_step.metadata["action"]
+        if "coins_collected" in traj_step.metadata:
+            step_dic["coins_collected"] = traj_step.metadata["coins_collected"]
+
+        out_tokens = [t["token"] for t in traj_step.metadata["logprobs"]]
+        step_dic["output_text"] = tokenizer.convert_tokens_to_string(out_tokens)
+        step_dic["output_tokens"] = to_dic_list(
+            step_dic["output_text"], tokenizer, groups=["output"]
+        )
+        step_dic["output_n_tokens"] = len(step_dic["output_tokens"])
+        step_dic["output_tokens"] = annotate_output_tokens(
+            model_name, step_dic["output_tokens"]
+        )
+
+        api_logprobs = traj_step.metadata["logprobs"]
+        for i, t in enumerate(step_dic["output_tokens"]):
+            if i >= len(api_logprobs):
+                break
+            if "top_logprobs" not in api_logprobs[i] or "template" in t["token_groups"]:
+                continue
+            curr_probs = {}
+            for logprob_dic in api_logprobs[i]["top_logprobs"]:
+                curr_probs[logprob_dic["token"]] = np.round(
+                    np.exp(logprob_dic["logprob"]), 4
+                )
+            step_dic["output_tokens"][i]["probabilities"] = curr_probs
+
+        steps.append(step_dic)
+
+    out = {
+        "grid_params": grid_params,
+        "model_params": model_params,
+        "prompt": prompt,
+        "steps": steps,
+    }
+    with open(output_path, "w") as f:
+        json.dump(out, f, cls=CompactJSONEncoder, ensure_ascii=False, indent=4)
+
+
+def get_multiple_trajectories_two_coin_env(
+    grid_sizes: list[int] = [11],
+    grid_complexities: list[float] = [0.8],
+    target_dead_ends: int | None = None,
+    place_at_dead_ends: bool = False,
+    coin_placement: Literal["random", "dead_end"] = "random",
+    min_manhattan_distance: int = 3,
+    max_attempts: int = 1000,
+    num_trajectories_per_grid: int = 5,
+    num_grids_per_config: int = 1,
+    max_steps_per_trajectory: int = 50,
+    max_tokens: int = 10000,
+    temperature: float = 0.7,
+    top_p: float = 0.95,
+    top_logprobs: int = 5,
+    seed: int = 42,
+    reasoning_efforts: list[Literal["low", "medium", "high"]] = ["low"],
+    model_names: list[str] = ["together_ai/openai/gpt-oss-20b"],
+    observation_placeholders: list[str] = ["grid_state"],
+    output_dir: str = ".",
+    verbose: bool = False,
+    enable_dynamic_max_steps: bool = False,
+    max_workers: int | None = None,
+    max_workers_per_grid: int | None = None,
+    enable_rate_limit: bool = False,
+    rate_limit: int = 1000,
+    rate_limit_period: float = 300.0,
+    hf_repo_id: str | None = None,
+    hf_path_prefix: str = "",
+    hf_token: str | None = None,
+    template_name: str = "grid_full_observability_two_coins_collect_one.j2",
+):
+    """Generate multiple trajectories on two-coin environments for each size × complexity × model combination.
+
+    Like get_multiple_trajectories_coin_env but uses TwoCoinNavigationEnv and places two coins
+    per grid. For each (grid_size, grid_complexity, model_name) combination, generates
+    num_grids_per_config unique grid layouts and runs num_trajectories_per_grid trajectories on
+    each layout in parallel.
+
+    Both coins must satisfy the min_manhattan_distance constraint relative to start, goal, and
+    each other. The template_name parameter controls the coin objective given to the agent.
+
+    Args:
+        grid_sizes: List of grid sizes to use.
+        grid_complexities: List of grid complexity levels.
+        target_dead_ends: Exact dead-end count required. If None, any environment is accepted.
+        place_at_dead_ends: If True, place agent start and goal at dead-end cells.
+        coin_placement: Strategy for placing coins: "random" = any open cell; "dead_end" =
+            dead-end cells (falls back to random if fewer than 2 dead ends available).
+        min_manhattan_distance: Minimum pairwise Manhattan distance required between agent
+            start, goal, and both coin positions.
+        max_attempts: Maximum generation attempts per grid.
+        num_trajectories_per_grid: Number of trajectories to generate per grid layout.
+        num_grids_per_config: Number of distinct grid layouts per (size, complexity, model).
+        max_steps_per_trajectory: Maximum steps per trajectory.
+        max_tokens: Maximum tokens per model generation step.
+        temperature: Sampling temperature.
+        top_p: Nucleus sampling parameter.
+        top_logprobs: Number of top log probabilities to return.
+        seed: Base random seed; each grid uses seed + grid_id.
+        reasoning_efforts: List of reasoning effort levels to run on each grid.
+        model_names: List of model names in "provider/model_id" format.
+        observation_placeholders: Placeholder names in the prompt template.
+        output_dir: Directory to save output JSON files.
+        verbose: If True, print detailed logging.
+        enable_dynamic_max_steps: If True, override max_steps_per_trajectory with 1.5×
+            the A* optimal path length.
+        max_workers: Max parallel workers for grid-level parallelism.
+        max_workers_per_grid: Max parallel workers within each grid.
+        enable_rate_limit: If True, enforce API rate limiting.
+        rate_limit: Max requests per rate_limit_period.
+        rate_limit_period: Rate limit time window in seconds.
+        hf_repo_id: Hugging Face repo to upload results to. None = no upload.
+        hf_path_prefix: Path prefix within the HF repo.
+        hf_token: Hugging Face API token.
+        template_name: Jinja2 template to use. Determines the agent's coin objective.
+
+    Returns:
+        list[str] | None: List of HF URLs if uploaded, otherwise None.
+        Results are saved to individual JSON files in output_dir with format:
+        {model_sanitized}_size{grid_size}_comp{grid_complexity}_grid{grid_id}_twocoin_{effort}_traj{traj_id}.json
+        Grid layouts are saved as:
+        {model_sanitized}_size{grid_size}_comp{grid_complexity}_grid{grid_id}_twocoin_layout.json
+    """
+    output_dir = str(_resolve_output(output_dir))
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    grid_configs = list(
+        product(
+            grid_sizes,
+            grid_complexities,
+            model_names,
+            range(num_grids_per_config),
+        )
+    )
+
+    total_grid_tasks = len(grid_configs)
+    total_trajectories = (
+        total_grid_tasks * num_trajectories_per_grid * len(reasoning_efforts)
+    )
+
+    logger.info(
+        f"Generating {total_trajectories} two-coin-env trajectories across {len(grid_sizes)} "
+        f"grid sizes, {len(grid_complexities)} complexities, {len(model_names)} models, "
+        f"with {num_grids_per_config} grids each, {num_trajectories_per_grid} trajectories per grid, "
+        f"and reasoning efforts {reasoning_efforts}."
+    )
+
+    rate_limiter: RateLimiter | None = None
+    if enable_rate_limit:
+        rate_limiter = RateLimiter(rate_limit=rate_limit, period=rate_limit_period)
+
+    def _build_two_coin_env(
+        grid_size: int, grid_complexity: float, rng_seed: int
+    ) -> tuple[FullObservabilityTextWrapper, list, list, int]:
+        """Build and reset a two-coin environment, retrying until all constraints are met.
+
+        Returns (wrapped_env, coin1_pos, coin2_pos, actual_dead_ends). The env is already
+        reset and has both coins placed — do not call reset() again.
+        """
+        np.random.seed(rng_seed)
+
+        resolved_coin1_pos = None
+        resolved_coin2_pos = None
+        base_env_unwrapped = None
+
+        for _ in range(max_attempts):
+            candidate = TwoCoinNavigationEnv(
+                size=grid_size,
+                complexity=grid_complexity,
+                place_at_dead_ends=place_at_dead_ends,
+            )
+            candidate.reset()
+
+            if (
+                target_dead_ends is not None
+                and len(get_all_dead_ends(candidate)) != target_dead_ends
+            ):
+                candidate.close()
+                continue
+
+            start = tuple(candidate.agent_pos)
+            goal = tuple(candidate.goal_pos)
+
+            if manhattan_distance(start, goal) < min_manhattan_distance:
+                candidate.close()
+                continue
+
+            excluded = {start, goal}
+            effective_placement = coin_placement
+
+            if effective_placement == "dead_end":
+                raw = [
+                    (x, y)
+                    for (x, y) in get_all_dead_ends(candidate)
+                    if (x, y) not in excluded
+                ]
+                if len(raw) < 2:
+                    logger.warning(
+                        "Fewer than 2 dead ends for two-coin placement; falling back to random."
+                    )
+                    effective_placement = "random"
+            if effective_placement == "random":
+                raw = [
+                    (x, y)
+                    for x in range(1, candidate.width - 1)
+                    for y in range(1, candidate.height - 1)
+                    if candidate.grid.get(x, y) is None and (x, y) not in excluded
+                ]
+
+            valid_1 = [
+                p
+                for p in raw
+                if manhattan_distance(start, p) >= min_manhattan_distance
+                and manhattan_distance(goal, p) >= min_manhattan_distance
+            ]
+            if not valid_1:
+                candidate.close()
+                continue
+
+            c1 = random.choice(valid_1)
+            excluded.add(c1)
+
+            valid_2 = [
+                p
+                for p in raw
+                if p not in excluded
+                and manhattan_distance(start, p) >= min_manhattan_distance
+                and manhattan_distance(goal, p) >= min_manhattan_distance
+                and manhattan_distance(c1, p) >= min_manhattan_distance
+            ]
+            if not valid_2:
+                candidate.close()
+                continue
+
+            c2 = random.choice(valid_2)
+            candidate.put_obj(Ball("yellow"), *c1)
+            candidate.put_obj(Ball("yellow"), *c2)
+
+            base_env_unwrapped = candidate
+            resolved_coin1_pos = c1
+            resolved_coin2_pos = c2
+            break
+
+        if base_env_unwrapped is None:
+            raise RuntimeError(
+                f"Could not generate a two-coin environment satisfying all constraints after {max_attempts} "
+                f"attempts (size={grid_size}, complexity={grid_complexity}, "
+                f"target_dead_ends={target_dead_ends}, min_manhattan_distance={min_manhattan_distance})."
+            )
+
+        actual_dead_ends = len(get_all_dead_ends(base_env_unwrapped))
+        return (
+            FullObservabilityTextWrapper(base_env_unwrapped),
+            resolved_coin1_pos,
+            resolved_coin2_pos,
+            actual_dead_ends,
+        )
+
+    def _save_two_coin_grid_layout(
+        env: FullObservabilityTextWrapper,
+        grid_size: int,
+        grid_complexity: float,
+        grid_id: int,
+        grid_seed: int,
+        model_sanitized: str,
+        coin1_pos: list,
+        coin2_pos: list,
+        actual_dead_ends: int,
+    ) -> str:
+        unwrapped = env.unwrapped
+
+        grid_list = []
+        for j in range(unwrapped.height):
+            row = []
+            for i in range(unwrapped.width):
+                cell = unwrapped.grid.get(i, j)
+                if (i, j) == tuple(unwrapped.agent_pos):
+                    row.append("A")
+                elif cell is None:
+                    row.append("_")
+                elif cell.type == "wall":
+                    row.append("#")
+                elif cell.type == "goal":
+                    row.append("G")
+                elif cell.type == "ball":
+                    row.append("C")
+                else:
+                    row.append("?")
+            grid_list.append(row)
+
+        agent_pos = unwrapped.agent_pos
+        agent_start_pos = (
+            agent_pos.tolist() if hasattr(agent_pos, "tolist") else list(agent_pos)
+        )
+        if (
+            hasattr(unwrapped, "_initial_agent_pos")
+            and unwrapped._initial_agent_pos is not None
+        ):
+            p = unwrapped._initial_agent_pos
+            agent_start_pos = p.tolist() if hasattr(p, "tolist") else list(p)
+
+        agent_start_dir = getattr(unwrapped, "_initial_agent_dir", unwrapped.agent_dir)
+
+        grid_data = {
+            "grid_id": grid_id,
+            "grid_seed": grid_seed,
+            "grid_size": grid_size,
+            "grid_complexity": grid_complexity,
+            "grid_width": unwrapped.width,
+            "grid_height": unwrapped.height,
+            "target_dead_ends": target_dead_ends,
+            "actual_dead_ends": actual_dead_ends,
+            "place_at_dead_ends": place_at_dead_ends,
+            "coin_placement": coin_placement,
+            "coin_pos_1": list(coin1_pos),
+            "coin_pos_2": list(coin2_pos),
+            "agent_start_pos": agent_start_pos,
+            "agent_start_dir": agent_start_dir,
+            "goal_pos": list(unwrapped.goal_pos),
+            "grid_layout": grid_list,
+            "grid_text": env._render(),
+            "legend": env.grid_cells,
+        }
+
+        grid_filename = (
+            f"{model_sanitized}_size{grid_size}_comp{grid_complexity}"
+            f"_grid{grid_id}_twocoin_layout.json"
+        )
+        grid_path = str(Path(output_dir) / grid_filename)
+        with open(grid_path, "w") as f:
+            json.dump(grid_data, f, indent=2)
+
+        if verbose:
+            logger.info(f"Saved two-coin grid layout to {grid_path}")
+
+        return grid_path
+
+    def _generate_trajectories_for_grid(config: tuple) -> dict:
+        grid_size, grid_complexity, model_name, grid_id = config
+        grid_seed = seed + grid_id
+        model_sanitized = model_name.replace("/", "_").replace(".", "_")
+
+        master_env, coin1_pos, coin2_pos, actual_dead_ends = _build_two_coin_env(
+            grid_size, grid_complexity, grid_seed
+        )
+
+        grid_path = _save_two_coin_grid_layout(
+            env=master_env,
+            grid_size=grid_size,
+            grid_complexity=grid_complexity,
+            grid_id=grid_id,
+            grid_seed=grid_seed,
+            model_sanitized=model_sanitized,
+            coin1_pos=coin1_pos,
+            coin2_pos=coin2_pos,
+            actual_dead_ends=actual_dead_ends,
+        )
+
+        def _generate_single_trajectory(traj_id: int, effort: str) -> dict:
+            if rate_limiter is not None:
+                rate_limiter.acquire()
+
+            traj_seed = grid_seed + traj_id * 1000 + hash(effort) % 10000
+            env_copy = copy.deepcopy(master_env)
+
+            output_filename = (
+                f"{model_sanitized}_size{grid_size}_comp{grid_complexity}"
+                f"_grid{grid_id}_twocoin_{effort}_traj{traj_id}.json"
+            )
+            output_path = str(Path(output_dir) / output_filename)
+
+            if verbose:
+                logger.info(
+                    f"Starting two-coin trajectory: model={model_name}, size={grid_size}, "
+                    f"complexity={grid_complexity}, grid={grid_id}, effort={effort}, traj={traj_id}"
+                )
+
+            try:
+                get_trajectory(
+                    grid_size=grid_size,
+                    grid_complexity=grid_complexity,
+                    max_steps_per_trajectory=max_steps_per_trajectory,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_logprobs=top_logprobs,
+                    seed=traj_seed,
+                    reasoning_effort=effort,
+                    model_name=model_name,
+                    observation_placeholders=observation_placeholders,
+                    output_path=output_path,
+                    verbose=verbose,
+                    enable_dynamic_max_steps=enable_dynamic_max_steps,
+                    env=env_copy,
+                    use_safe_reset=True,
+                    template_name=template_name,
+                )
+                return {
+                    "status": "success",
+                    "output_path": output_path,
+                    "config": config,
+                    "traj_id": traj_id,
+                    "effort": effort,
+                }
+            except Exception as e:
+                logger.error(
+                    f"Failed two-coin trajectory grid={grid_id}, effort={effort}, traj={traj_id}: {e}"
+                )
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "config": config,
+                    "traj_id": traj_id,
+                    "effort": effort,
+                }
+
+        inner_workers = (
+            max_workers_per_grid
+            if max_workers_per_grid is not None
+            else num_trajectories_per_grid * len(reasoning_efforts)
+        )
+        trajectory_results = []
+
+        with ThreadPoolExecutor(max_workers=inner_workers) as inner_executor:
+            futures = {
+                inner_executor.submit(_generate_single_trajectory, traj_id, effort): (
+                    traj_id,
+                    effort,
+                )
+                for effort in reasoning_efforts
+                for traj_id in range(num_trajectories_per_grid)
+            }
+            for future in as_completed(futures):
+                traj_id, effort = futures[future]
+                try:
+                    trajectory_results.append(future.result())
+                except Exception as e:
+                    logger.error(
+                        f"Exception for grid {grid_id}, effort {effort}, traj {traj_id}: {e}"
+                    )
+                    trajectory_results.append(
+                        {
+                            "status": "error",
+                            "error": str(e),
+                            "config": config,
+                            "traj_id": traj_id,
+                            "effort": effort,
+                        }
+                    )
+
+        return {"trajectory_results": trajectory_results, "grid_paths": [grid_path]}
+
+    if max_workers is None:
+        max_workers = min(32, total_grid_tasks)
+
+    if enable_rate_limit and rate_limiter is not None:
+        sustainable_workers = min(max_workers, int(rate_limiter.tokens_per_second * 2))
+        if sustainable_workers < max_workers:
+            logger.info(
+                f"Adjusting max_workers from {max_workers} to {sustainable_workers} "
+                f"based on rate limit ({rate_limiter.tokens_per_second:.2f} req/sec)"
+            )
+            max_workers = sustainable_workers
+
+    all_trajectory_results = []
+    all_grid_paths = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_generate_trajectories_for_grid, config): config
+            for config in grid_configs
+        }
+        for future in tqdm(
+            as_completed(futures),
+            total=total_grid_tasks,
+            desc="Processing two-coin grids",
+            unit="grid",
+        ):
+            config = futures[future]
+            try:
+                result = future.result()
+                all_trajectory_results.extend(result["trajectory_results"])
+                all_grid_paths.extend(result["grid_paths"])
+                failures = [
+                    r for r in result["trajectory_results"] if r["status"] != "success"
+                ]
+                for failure in failures:
+                    tqdm.write(
+                        f"Failed for grid {config}, traj {failure['traj_id']}: "
+                        f"{failure.get('error', 'Unknown error')}"
+                    )
+            except Exception as e:
+                tqdm.write(f"Exception for grid {config}: {e}")
+                for traj_id in range(num_trajectories_per_grid):
+                    all_trajectory_results.append(
+                        {
+                            "status": "error",
+                            "error": str(e),
+                            "config": config,
+                            "traj_id": traj_id,
+                        }
+                    )
+
+    success_count = sum(1 for r in all_trajectory_results if r["status"] == "success")
+    logger.info(
+        f"Completed {success_count}/{total_trajectories} two-coin-env trajectories successfully."
+    )
     logger.info(f"Saved {len(all_grid_paths)} grid layout files.")
 
     if hf_repo_id is not None and (success_count > 0 or all_grid_paths):
@@ -1952,10 +2827,17 @@ def augment_from_layouts(
                         nx, ny = x + dx, y + dy
                         if (nx, ny) in reachable:
                             continue
-                        if nx < 0 or ny < 0 or nx >= base_env.width or ny >= base_env.height:
+                        if (
+                            nx < 0
+                            or ny < 0
+                            or nx >= base_env.width
+                            or ny >= base_env.height
+                        ):
                             continue
                         cell = base_env.grid.get(nx, ny)
-                        if cell is None or (hasattr(cell, "can_overlap") and cell.can_overlap()):
+                        if cell is None or (
+                            hasattr(cell, "can_overlap") and cell.can_overlap()
+                        ):
                             reachable.add((nx, ny))
                             queue.append((nx, ny))
 
@@ -1969,13 +2851,18 @@ def augment_from_layouts(
                     and (x, y) in reachable
                 ]
 
-                sampled = random.sample(valid_starts, min(num_random_starts, len(valid_starts)))
+                sampled = random.sample(
+                    valid_starts, min(num_random_starts, len(valid_starts))
+                )
                 for pos in sampled:
                     env_copy = clone_env(base_env)
                     env_copy.agent_pos = np.array(pos)
                     env_copy._initial_agent_pos = np.array(pos)
                     variants.append(
-                        (FullObservabilityTextWrapper(env_copy), f"RandomStart_{pos[0]}_{pos[1]}")
+                        (
+                            FullObservabilityTextWrapper(env_copy),
+                            f"RandomStart_{pos[0]}_{pos[1]}",
+                        )
                     )
 
             else:
@@ -1993,8 +2880,13 @@ def augment_from_layouts(
         coin_pos = find_coin_pos(env_u)
 
         agent_pos = env_u.agent_pos
-        agent_start_pos = agent_pos.tolist() if hasattr(agent_pos, "tolist") else list(agent_pos)
-        if hasattr(env_u, "_initial_agent_pos") and env_u._initial_agent_pos is not None:
+        agent_start_pos = (
+            agent_pos.tolist() if hasattr(agent_pos, "tolist") else list(agent_pos)
+        )
+        if (
+            hasattr(env_u, "_initial_agent_pos")
+            and env_u._initial_agent_pos is not None
+        ):
             p = env_u._initial_agent_pos
             agent_start_pos = p.tolist() if hasattr(p, "tolist") else list(p)
 
@@ -2043,12 +2935,18 @@ def augment_from_layouts(
 
         for model_name in model_names:
             for wrapped_env, variant_name in variants:
-                saved_path = _save_variant_layout(wrapped_env, layout, variant_name, original_stem)
+                saved_path = _save_variant_layout(
+                    wrapped_env, layout, variant_name, original_stem
+                )
                 all_layout_paths.append(saved_path)
-                variant_tasks.append((wrapped_env, variant_name, original_stem, model_name))
+                variant_tasks.append(
+                    (wrapped_env, variant_name, original_stem, model_name)
+                )
 
     total_variants = len(variant_tasks)
-    total_trajectories = total_variants * num_trajectories_per_variant * len(reasoning_efforts)
+    total_trajectories = (
+        total_variants * num_trajectories_per_variant * len(reasoning_efforts)
+    )
     logger.info(
         f"Loaded {len(layout_files)} layout files; built {total_variants} variants. "
         f"Generating {total_trajectories} trajectories."
@@ -2094,7 +2992,9 @@ def augment_from_layouts(
                         transform_type=variant_name,
                         template_name=template_name,
                     )
-                    trajectory_results.append({"status": "success", "output_path": output_path})
+                    trajectory_results.append(
+                        {"status": "success", "output_path": output_path}
+                    )
                 except Exception as e:
                     logger.error(
                         f"Failed: variant={variant_name}, effort={effort}, traj={traj_id}: {e}"
@@ -2105,7 +3005,9 @@ def augment_from_layouts(
 
         return {"trajectory_results": trajectory_results}
 
-    effective_workers = max_workers if max_workers is not None else min(32, total_variants)
+    effective_workers = (
+        max_workers if max_workers is not None else min(32, total_variants)
+    )
     all_trajectory_results: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
@@ -2120,7 +3022,9 @@ def augment_from_layouts(
             try:
                 result = future.result()
                 all_trajectory_results.extend(result["trajectory_results"])
-                failures = [r for r in result["trajectory_results"] if r["status"] != "success"]
+                failures = [
+                    r for r in result["trajectory_results"] if r["status"] != "success"
+                ]
                 for failure in failures:
                     tqdm.write(
                         f"Failed for variant {task[1]}: {failure.get('error', 'Unknown error')}"
@@ -2240,7 +3144,9 @@ def reshuffle_walls_from_layouts(
 
         for perm_idx in range(num_permutations):
             variant_name = f"walls{perm_idx}"
-            env_unwrapped = _reshuffle_walls(layout, max_attempts=max_attempts_per_permutation)
+            env_unwrapped = _reshuffle_walls(
+                layout, max_attempts=max_attempts_per_permutation
+            )
 
             if env_unwrapped is None:
                 logger.warning(
@@ -2254,8 +3160,13 @@ def reshuffle_walls_from_layouts(
             # Save layout JSON
             coin_pos = find_coin_pos(env_unwrapped)
             agent_pos = env_unwrapped.agent_pos
-            agent_start_pos = agent_pos.tolist() if hasattr(agent_pos, "tolist") else list(agent_pos)
-            if hasattr(env_unwrapped, "_initial_agent_pos") and env_unwrapped._initial_agent_pos is not None:
+            agent_start_pos = (
+                agent_pos.tolist() if hasattr(agent_pos, "tolist") else list(agent_pos)
+            )
+            if (
+                hasattr(env_unwrapped, "_initial_agent_pos")
+                and env_unwrapped._initial_agent_pos is not None
+            ):
                 p = env_unwrapped._initial_agent_pos
                 agent_start_pos = p.tolist() if hasattr(p, "tolist") else list(p)
 
@@ -2275,8 +3186,12 @@ def reshuffle_walls_from_layouts(
                 "coin_placement": layout.get("coin_placement"),
                 "coin_pos": list(coin_pos) if coin_pos is not None else None,
                 "agent_start_pos": agent_start_pos,
-                "agent_start_dir": getattr(env_unwrapped, "_initial_agent_dir", env_unwrapped.agent_dir),
-                "goal_pos": list(env_unwrapped.goal_pos) if env_unwrapped.goal_pos is not None else None,
+                "agent_start_dir": getattr(
+                    env_unwrapped, "_initial_agent_dir", env_unwrapped.agent_dir
+                ),
+                "goal_pos": list(env_unwrapped.goal_pos)
+                if env_unwrapped.goal_pos is not None
+                else None,
                 "grid_layout": _env_to_grid_list(env_unwrapped),
                 "grid_text": wrapped_env._render(),
                 "legend": wrapped_env.grid_cells,
@@ -2291,10 +3206,14 @@ def reshuffle_walls_from_layouts(
                 logger.info(f"Saved reshuffled layout: {layout_filename}")
 
             for model_name in model_names:
-                variant_tasks.append((wrapped_env, variant_name, original_stem, model_name))
+                variant_tasks.append(
+                    (wrapped_env, variant_name, original_stem, model_name)
+                )
 
     total_variants = len(variant_tasks)
-    total_trajectories = total_variants * num_trajectories_per_permutation * len(reasoning_efforts)
+    total_trajectories = (
+        total_variants * num_trajectories_per_permutation * len(reasoning_efforts)
+    )
     logger.info(
         f"Loaded {len(layout_files)} layout files; built {total_variants} wall permutations. "
         f"Generating {total_trajectories} trajectories."
@@ -2310,7 +3229,9 @@ def reshuffle_walls_from_layouts(
                     rate_limiter.acquire()
 
                 env_copy = copy.deepcopy(wrapped_env)
-                output_filename = f"{original_stem}_{variant_name}_{effort}_traj{traj_id}.json"
+                output_filename = (
+                    f"{original_stem}_{variant_name}_{effort}_traj{traj_id}.json"
+                )
                 output_path = str(Path(output_dir_str) / output_filename)
 
                 if verbose:
@@ -2338,7 +3259,9 @@ def reshuffle_walls_from_layouts(
                         transform_type=variant_name,
                         template_name=template_name,
                     )
-                    trajectory_results.append({"status": "success", "output_path": output_path})
+                    trajectory_results.append(
+                        {"status": "success", "output_path": output_path}
+                    )
                 except Exception as e:
                     logger.error(
                         f"Failed: variant={variant_name}, effort={effort}, traj={traj_id}: {e}"
@@ -2349,7 +3272,9 @@ def reshuffle_walls_from_layouts(
 
         return {"trajectory_results": trajectory_results}
 
-    effective_workers = max_workers if max_workers is not None else min(32, total_variants)
+    effective_workers = (
+        max_workers if max_workers is not None else min(32, total_variants)
+    )
     all_trajectory_results: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
@@ -2364,7 +3289,9 @@ def reshuffle_walls_from_layouts(
             try:
                 result = future.result()
                 all_trajectory_results.extend(result["trajectory_results"])
-                failures = [r for r in result["trajectory_results"] if r["status"] != "success"]
+                failures = [
+                    r for r in result["trajectory_results"] if r["status"] != "success"
+                ]
                 for failure in failures:
                     tqdm.write(
                         f"Failed for variant {task[1]}: {failure.get('error', 'Unknown error')}"

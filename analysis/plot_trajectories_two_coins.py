@@ -1,18 +1,20 @@
 """
-plot_trajectories.py
+plot_trajectories_two_coins.py
 
-CLI: given a folder of layout + trajectory JSON files, produce two outputs per
-layout in <folder>/plots/:
+CLI: given a folder of two-coin layout + trajectory JSON files, produce two
+outputs per layout in <folder>/plots/:
 
     {prefix}_panels.png   — one panel per trajectory (N panels in a 5-col grid)
     {prefix}_heatmap.png  — cell visit-frequency heatmap across all trajectories
 
 Usage:
-    python plot_trajectories.py <data_folder>
+    python plot_trajectories_two_coins.py <data_folder> [effort]
+
+effort defaults to "low". Pass "medium" or "high" to match those trajectory files.
 
 Naming convention expected in <data_folder>:
-    *_layout.json          — one per layout
-    *_low_traj{N}.json     — trajectories for that layout (N = 0, 1, 2, …)
+    *_layout.json                 — one per layout (must contain coin_pos_1, coin_pos_2)
+    *_{effort}_traj{N}.json       — trajectories for that layout (N = 0, 1, 2, …)
 """
 
 import json
@@ -42,7 +44,8 @@ def load_layout(layout_path: Path) -> dict:
     with open(layout_path) as f:
         data = json.load(f)
     return {
-        "coin_pos":    tuple(data["coin_pos"]),
+        "coin_pos_1":  tuple(data["coin_pos_1"]),
+        "coin_pos_2":  tuple(data["coin_pos_2"]),
         "goal_pos":    tuple(data["goal_pos"]),
         "start_pos":   tuple(data["agent_start_pos"]),
         "grid_layout": data["grid_layout"],
@@ -66,8 +69,38 @@ def find_symbol_in_grid_state(grid_state_rows, symbol):
     return None
 
 
-def coin_present_in_grid_state(grid_state_rows):
-    return any("C" in row for row in grid_state_rows)
+def count_coins_in_grid_state(grid_state_rows):
+    """Count how many 'C' symbols appear in the text grid_state."""
+    count = 0
+    for row_str in grid_state_rows[1:]:
+        parts = row_str.split()
+        if len(parts) < 2:
+            continue
+        try:
+            int(parts[0])
+        except ValueError:
+            continue
+        count += sum(1 for cell in parts[1:] if cell == "C")
+    return count
+
+
+def find_coin_collection_steps(steps):
+    """Return (step_idx_coin1, step_idx_coin2) where each coin disappears.
+
+    Watches the count of 'C' symbols across steps. Returns None for a coin
+    if it was never collected during the trajectory.
+    """
+    prev_count = None
+    collection_steps = []
+    for i, step in enumerate(steps):
+        count = count_coins_in_grid_state(step.get("grid_state", []))
+        if prev_count is not None and count < prev_count:
+            collection_steps.append(i)
+        prev_count = count
+
+    first  = collection_steps[0] if len(collection_steps) > 0 else None
+    second = collection_steps[1] if len(collection_steps) > 1 else None
+    return first, second
 
 
 def build_path(steps):
@@ -85,16 +118,6 @@ def build_path(steps):
     return path
 
 
-def find_coin_collection_step(steps):
-    was_present = True
-    for i, step in enumerate(steps):
-        present = coin_present_in_grid_state(step.get("grid_state", []))
-        if was_present and not present:
-            return i
-        was_present = present
-    return None
-
-
 def detect_reached_goal(steps, goal_pos):
     if not steps:
         return False
@@ -108,18 +131,19 @@ def detect_reached_goal(steps, goal_pos):
 
 # ── Panel drawing ─────────────────────────────────────────────────────────────
 
-def draw_panel(ax, layout, path, traj_id, coin_collected, reached_goal,
-               coin_collection_step):
-    grid      = layout["grid_layout"]
-    rows      = len(grid)
-    cols      = len(grid[0])
-    coin_pos  = layout["coin_pos"]
-    goal_pos  = layout["goal_pos"]
-    start_pos = layout["start_pos"]
+def draw_panel(ax, layout, path, traj_id, coins_collected, reached_goal,
+               cc_step_1, cc_step_2):
+    grid       = layout["grid_layout"]
+    rows       = len(grid)
+    cols       = len(grid[0])
+    coin_pos_1 = layout["coin_pos_1"]
+    coin_pos_2 = layout["coin_pos_2"]
+    goal_pos   = layout["goal_pos"]
+    start_pos  = layout["start_pos"]
 
     ax.set_facecolor("white")
 
-    # Cell-type image (walls + goal cell; coin cell only if not yet collected)
+    # Cell-type image
     cell_img = np.ones((rows, cols), dtype=int) * EMPTY
     for r in range(rows):
         for c in range(cols):
@@ -127,8 +151,10 @@ def draw_panel(ax, layout, path, traj_id, coin_collected, reached_goal,
                 cell_img[r, c] = WALL
     if not reached_goal:
         cell_img[goal_pos[1], goal_pos[0]] = GOAL
-    if not coin_collected:
-        cell_img[coin_pos[1], coin_pos[0]] = COIN
+    if cc_step_1 is None:  # coin 1 never collected — draw it
+        cell_img[coin_pos_1[1], coin_pos_1[0]] = COIN
+    if cc_step_2 is None:  # coin 2 never collected — draw it
+        cell_img[coin_pos_2[1], coin_pos_2[0]] = COIN
 
     ax.imshow(cell_img, origin="upper", cmap=GRID_CMAP, vmin=0, vmax=3,
               interpolation="nearest", aspect="equal")
@@ -139,7 +165,7 @@ def draw_panel(ax, layout, path, traj_id, coin_collected, reached_goal,
     for c in range(cols + 1):
         ax.axvline(c - 0.5, color="#aaaaaa", lw=0.3, zorder=1)
 
-    # ── Temporal-gradient path with perpendicular jitter ────────────────────────
+    # ── Temporal-gradient path with perpendicular jitter ──────────────────────
     if len(path) >= 2:
         n = len(path) - 1
         jitter_scale = 0.25
@@ -154,7 +180,7 @@ def draw_panel(ax, layout, path, traj_id, coin_collected, reached_goal,
             length = math.hypot(dx, dy)
             if length > 0:
                 px, py = -dy / length, dx / length
-                mag  = (k % 2) * jitter_scale   # lane 0 or lane 1 only
+                mag  = (k % 2) * jitter_scale
                 ox, oy = mag * px, mag * py
             else:
                 ox, oy = 0.0, 0.0
@@ -162,8 +188,6 @@ def draw_panel(ax, layout, path, traj_id, coin_collected, reached_goal,
 
         t_vals = np.linspace(0, 1, n)
 
-        # Insert short bridge segments at turns where adjacent jittered segments
-        # don't share an endpoint, keeping the rendered line connected.
         all_segs, all_t = [], []
         for i in range(n):
             all_segs.append(jsegs[i])
@@ -180,7 +204,6 @@ def draw_panel(ax, layout, path, traj_id, coin_collected, reached_goal,
         lc.set_clim(0, 1)
         ax.add_collection(lc)
 
-        # Arrowhead + step label every 5 steps (at steps 5, 10, 15, …)
         for i in range(4, n, 5):
             p0_j, p1_j = jsegs[i]
             dx = p1_j[0] - p0_j[0]
@@ -193,13 +216,12 @@ def draw_panel(ax, layout, path, traj_id, coin_collected, reached_goal,
                 arrowprops=dict(arrowstyle="-|>", color=seg_color,
                                 lw=0.5, mutation_scale=6),
                 zorder=7)
-            # Step count at top-left corner of destination cell
             dest = path[i + 1]
             ax.text(dest[0] - 0.42, dest[1] - 0.42, str(i + 1),
                     fontsize=3.5, color=seg_color, fontweight="bold",
                     ha="left", va="top", zorder=8)
 
-    # Final position — green triangle if goal reached, dark-red X otherwise
+    # Final position
     if path:
         if reached_goal:
             ax.plot(path[-1][0], path[-1][1], "^",
@@ -208,11 +230,12 @@ def draw_panel(ax, layout, path, traj_id, coin_collected, reached_goal,
             ax.plot(path[-1][0], path[-1][1], "X",
                     color="darkred", ms=7, mec="white", mew=0.7, zorder=8)
 
-    # Coin collection step — yellow diamond
-    if coin_collected and coin_collection_step is not None:
-        idx = min(coin_collection_step, len(path) - 1)
-        ax.plot(path[idx][0], path[idx][1], "D",
-                color="#FFD700", ms=9, mec="white", mew=0.8, zorder=8)
+    # Coin collection markers — yellow diamond per coin collected
+    for cc_step in (cc_step_1, cc_step_2):
+        if cc_step is not None:
+            idx = min(cc_step, len(path) - 1)
+            ax.plot(path[idx][0], path[idx][1], "D",
+                    color="#FFD700", ms=9, mec="white", mew=0.8, zorder=8)
 
     # ── Cell text labels ──────────────────────────────────────────────────────
     ax.text(start_pos[0], start_pos[1], "S",
@@ -221,15 +244,19 @@ def draw_panel(ax, layout, path, traj_id, coin_collected, reached_goal,
     ax.text(goal_pos[0], goal_pos[1], "G",
             ha="center", va="center", fontsize=5, fontweight="bold",
             color="black", zorder=9)
-    ax.text(coin_pos[0], coin_pos[1], "C",
-            ha="center", va="center", fontsize=5, fontweight="bold",
+    ax.text(coin_pos_1[0], coin_pos_1[1], "C1",
+            ha="center", va="center", fontsize=4, fontweight="bold",
+            color="black", zorder=9)
+    ax.text(coin_pos_2[0], coin_pos_2[1], "C2",
+            ha="center", va="center", fontsize=4, fontweight="bold",
             color="black", zorder=9)
 
-    # ── Outcome badge + step count ────────────────────────────────────────────
-    goal_str = "✓G" if reached_goal else "✗G"
-    coin_str = "✓C" if coin_collected else "✗C"
-    badge_color = ("#2d8a2d" if (reached_goal and coin_collected)
-                  else "#cc8800" if (reached_goal or coin_collected)
+    # ── Outcome badge ─────────────────────────────────────────────────────────
+    goal_str  = "✓G" if reached_goal else "✗G"
+    coin_str  = f"C:{coins_collected}/2"
+    both_collected = coins_collected == 2
+    badge_color = ("#2d8a2d" if (reached_goal and both_collected)
+                  else "#cc8800" if (reached_goal or coins_collected > 0)
                   else "#cc2222")
     ax.text(0.98, 0.98, f"{goal_str} {coin_str}",
             transform=ax.transAxes, fontsize=5.5, va="top", ha="right",
@@ -255,7 +282,7 @@ def plot_panels(layout, traj_data, prefix, out_dir):
     n     = len(traj_data)
     nrows = max(1, math.ceil(n / NCOLS))
 
-    grid         = layout["grid_layout"]
+    grid           = layout["grid_layout"]
     g_rows, g_cols = len(grid), len(grid[0])
     panel_w = max(1.8, g_cols * 0.3)
     panel_h = max(1.8, g_rows * 0.3)
@@ -270,15 +297,14 @@ def plot_panels(layout, traj_data, prefix, out_dir):
         if idx < n:
             td = traj_data[idx]
             draw_panel(ax, layout, td["path"], td["traj_id"],
-                       td["coin_collected"], td["reached_goal"],
-                       td["cc_step"])
+                       td["coins_collected"], td["reached_goal"],
+                       td["cc_step_1"], td["cc_step_2"])
         else:
             ax.set_visible(False)
 
     fig.suptitle(prefix, fontsize=7, y=1.01)
     fig.tight_layout(rect=[0, 0, 0.93, 1])
 
-    # Timestep colorbar on the right
     sm = plt.cm.ScalarMappable(cmap=_TRAJ_CMAP, norm=plt.Normalize(0, 1))
     sm.set_array([])
     cbar_ax = fig.add_axes([0.945, 0.1, 0.014, 0.78])
@@ -299,7 +325,8 @@ def plot_heatmap(layout, traj_data, prefix, out_dir):
     grid       = layout["grid_layout"]
     rows, cols = len(grid), len(grid[0])
     goal_pos   = layout["goal_pos"]
-    coin_pos   = layout["coin_pos"]
+    coin_pos_1 = layout["coin_pos_1"]
+    coin_pos_2 = layout["coin_pos_2"]
     start_pos  = layout["start_pos"]
 
     counts = np.zeros((rows, cols), dtype=float)
@@ -328,8 +355,10 @@ def plot_heatmap(layout, traj_data, prefix, out_dir):
 
     ax.text(goal_pos[0], goal_pos[1], "G", ha="center", va="center",
             fontsize=7, fontweight="bold", color="black", zorder=5)
-    ax.text(coin_pos[0], coin_pos[1], "C", ha="center", va="center",
-            fontsize=7, fontweight="bold", color="black", zorder=5)
+    ax.text(coin_pos_1[0], coin_pos_1[1], "C1", ha="center", va="center",
+            fontsize=6, fontweight="bold", color="black", zorder=5)
+    ax.text(coin_pos_2[0], coin_pos_2[1], "C2", ha="center", va="center",
+            fontsize=6, fontweight="bold", color="black", zorder=5)
     ax.text(start_pos[0], start_pos[1], "S", ha="center", va="center",
             fontsize=7, fontweight="bold", color="black", zorder=5)
 
@@ -362,12 +391,17 @@ def process_layout(layout_path: Path, out_dir: Path, effort: str = "low"):
             data = json.load(f)
         steps          = data.get("steps", [])
         path           = build_path(steps)
-        cc_step        = find_coin_collection_step(steps)
-        coin_collected = cc_step is not None
+        cc_step_1, cc_step_2 = find_coin_collection_steps(steps)
+        coins_collected = (0 + (cc_step_1 is not None) + (cc_step_2 is not None))
         reached_goal   = detect_reached_goal(steps, layout["goal_pos"])
-        traj_data.append(dict(path=path, coin_collected=coin_collected,
-                              cc_step=cc_step, reached_goal=reached_goal,
-                              traj_id=traj_id))
+        traj_data.append(dict(
+            path=path,
+            coins_collected=coins_collected,
+            cc_step_1=cc_step_1,
+            cc_step_2=cc_step_2,
+            reached_goal=reached_goal,
+            traj_id=traj_id,
+        ))
 
     plot_panels(layout, traj_data, prefix, out_dir)
     plot_heatmap(layout, traj_data, prefix, out_dir)
@@ -391,6 +425,6 @@ def main(folder: Path, effort: str = "low"):
 
 if __name__ == "__main__":
     if len(sys.argv) not in (2, 3):
-        sys.exit("Usage: python plot_trajectories.py <data_folder> [effort]")
+        sys.exit("Usage: python plot_trajectories_two_coins.py <data_folder> [effort]")
     effort = sys.argv[2] if len(sys.argv) == 3 else "low"
     main(Path(sys.argv[1]), effort=effort)

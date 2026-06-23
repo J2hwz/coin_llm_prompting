@@ -108,7 +108,6 @@ def clone_env(env: MiniGridEnv) -> MiniGridEnv:
     return cloned
 
 
-
 def remove_coin(env: MiniGridEnv) -> MiniGridEnv:
     """
     Create a copy of the environment with the coin removed.
@@ -134,7 +133,6 @@ def remove_coin(env: MiniGridEnv) -> MiniGridEnv:
         cloned_env.coin_collected = None
 
     return cloned_env
-
 
 
 def compute_optimal_path_length(env: MiniGridEnv) -> float:

@@ -29,10 +29,7 @@ class RateLimiter:
     """
 
     def __init__(
-        self,
-        rate_limit: int,
-        period: float,
-        initial_tokens: Optional[int] = None
+        self, rate_limit: int, period: float, initial_tokens: Optional[int] = None
     ):
         if rate_limit <= 0:
             raise ValueError(f"rate_limit must be positive, got {rate_limit}")
@@ -149,7 +146,9 @@ class RateLimitInfo:
         self.description = description
 
     @classmethod
-    def from_requests_per_minute(cls, requests_per_minute: int, description: str = "") -> "RateLimitInfo":
+    def from_requests_per_minute(
+        cls, requests_per_minute: int, description: str = ""
+    ) -> "RateLimitInfo":
         """Create rate limit info from requests per minute.
 
         Args:
@@ -162,7 +161,9 @@ class RateLimitInfo:
         return cls(rate_limit=requests_per_minute, period=60.0, description=description)
 
     @classmethod
-    def from_custom_period(cls, rate_limit: int, period_minutes: float, description: str = "") -> "RateLimitInfo":
+    def from_custom_period(
+        cls, rate_limit: int, period_minutes: float, description: str = ""
+    ) -> "RateLimitInfo":
         """Create rate limit info from custom period.
 
         Args:
@@ -173,11 +174,15 @@ class RateLimitInfo:
         Returns:
             RateLimitInfo instance.
         """
-        return cls(rate_limit=rate_limit, period=period_minutes * 60, description=description)
+        return cls(
+            rate_limit=rate_limit, period=period_minutes * 60, description=description
+        )
 
     def __repr__(self) -> str:
         if self.description:
-            return f"RateLimitInfo({self.rate_limit}/{self.period}s ({self.description}))"
+            return (
+                f"RateLimitInfo({self.rate_limit}/{self.period}s ({self.description}))"
+            )
         return f"RateLimitInfo({self.rate_limit}/{self.period}s)"
 
 
@@ -185,23 +190,19 @@ class RateLimitInfo:
 TOGETHER_AI_FREE_TIER = RateLimitInfo(
     rate_limit=1000,
     period=300,
-    description="Together AI free tier: 1000 requests per 5 minutes"
+    description="Together AI free tier: 1000 requests per 5 minutes",
 )
 
 TOGETHER_AI_PAID_TIER_1 = RateLimitInfo(
     rate_limit=6000,
     period=60,
-    description="Together AI paid tier 1: 6000 requests per minute"
+    description="Together AI paid tier 1: 6000 requests per minute",
 )
 
 OPENAI_TIER_1 = RateLimitInfo(
-    rate_limit=3000,
-    period=60,
-    description="OpenAI tier 1: 3000 requests per minute"
+    rate_limit=3000, period=60, description="OpenAI tier 1: 3000 requests per minute"
 )
 
 ANTHROPIC_TIER_1 = RateLimitInfo(
-    rate_limit=1000,
-    period=60,
-    description="Anthropic tier 1: 1000 requests per minute"
+    rate_limit=1000, period=60, description="Anthropic tier 1: 1000 requests per minute"
 )

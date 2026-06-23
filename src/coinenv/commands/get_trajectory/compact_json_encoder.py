@@ -106,10 +106,7 @@ class CompactJSONEncoder(json.JSONEncoder):
         # Force multiline formatting for values of specific keys
         if self.current_key in self.MULTILINE_KEYS:
             return False
-        return (
-            len(o) <= self.MAX_ITEMS
-            and len(str(o)) - 2 <= self.MAX_WIDTH
-        )
+        return len(o) <= self.MAX_ITEMS and len(str(o)) - 2 <= self.MAX_WIDTH
 
     @property
     def indent_str(self) -> str:

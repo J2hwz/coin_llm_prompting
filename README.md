@@ -62,7 +62,8 @@ Do not commit this file — it is already in `.gitignore`.
 │   ├── full_obs_trajectory_analysis.py  # Metrics + plots for standard navigation
 │   ├── coin_trajectory_analysis.py  # Phase-aware metrics + plots for coin envs
 │   ├── coin_trajectory_analysis_metrics.md  # Full metrics reference for coin analysis
-│   ├── plot_trajectories.py         # Standalone trajectory plotting utilities
+│   ├── plot_trajectories.py         # Standalone trajectory plotting utilities (supports --effort flag)
+│   ├── plot_trajectories_two_coins.py  # Trajectory plotting for two-coin environments
 │   └── traj_checking.Rmd            # R Markdown for trajectory inspection
 ├── data/                            # Output trajectories (gitignored)
 ├── src/
@@ -95,6 +96,8 @@ The package exposes a `coinenv-cli` command after installation. The entry point 
 | `get_trajectories_multiple_per_grid` | Multiple trajectories on the same grid |
 | `get_single_trajectory_coin_env` | Single trajectory with dead-end constraints and optional coin |
 | `get_multiple_trajectories_coin_env` | Batch coin environment trajectories |
+| `get_single_trajectory_two_coin_env` | Single trajectory with two coins; template controls the agent's objective |
+| `get_multiple_trajectories_two_coin_env` | Batch two-coin environment trajectories |
 | `augment_from_layouts` | Generate trajectories on ISO-difficulty augmented variants of saved layouts |
 | `reshuffle_walls_from_layouts` | Regenerate wall layouts (same complexity, fixed anchors) and collect trajectories |
 | `upload_trajectories_dir` | Push saved trajectories to HuggingFace Hub |
@@ -142,6 +145,9 @@ The maze is generated fresh at the start of each trajectory and not stored befor
 |---|---|
 | `grid_full_observability.j2` | Full observability, standard navigation |
 | `grid_full_observability_hidden_goals.j2` | Full observability with coin — agent must collect coin then reach goal |
+| `grid_full_observability_two_coins_collect_one.j2` | Two coins present; agent instructed to collect exactly one then reach goal |
+| `grid_full_observability_two_coins_collect_all.j2` | Two coins present; agent instructed to collect both then reach goal |
+| `grid_full_observability_avoid_coin.j2` | Coin present; agent instructed to avoid it and reach goal directly |
 | `grid_partial_observability.j2` | Partial observability with action history |
 | `grid_partial_observability_with_note.j2` | Partial obs + agent note-taking |
 
@@ -341,7 +347,7 @@ Each run produces:
 | `src/coinenv/templates/` | Jinja2 prompt templates |
 | `src/coinenv/trajectory_generator/trajectory_generator.py` | Step-by-step environment loop |
 | `src/coinenv/datatypes.py` | `Step`, `Trajectory`, `Action` data structures |
-| `src/coinenv/environment_generator/custom_minigrid.py` | `Simple2DNavigationEnv` and `CoinNavigationEnv` |
+| `src/coinenv/environment_generator/custom_minigrid.py` | `Simple2DNavigationEnv`, `CoinNavigationEnv`, and `TwoCoinNavigationEnv` |
 | `src/coinenv/environment_generator/env_transformations.py` | ISO-difficulty grid transforms |
 | `src/coinenv/environment_generator/utils.py` | Grid utilities (dead-end detection, A* distance, coin position) |
 | `analysis/metrics.py` | Pure math utilities: entropy, JSD, KL, calibration, stats |
