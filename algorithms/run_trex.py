@@ -67,7 +67,7 @@ def _score_grid_to_json(score_grid):
 
 def run_grid_trex(data_dir, grid_id, plots_dir, effort="low",
                   clip_len=10, n_pairs=5000, lr=1e-3, hidden_dim=64,
-                  save_model=False):
+                  save_model=False, skip_invalid_actions: bool = False):
     """Run the full T-REX pipeline on a single grid and compare to MaxEnt IRL.
 
     Parameters
@@ -85,7 +85,7 @@ def run_grid_trex(data_dir, grid_id, plots_dir, effort="low",
         None if no successful trajectories exist.
     """
     # Load layout + successful paths (MaxEnt needs successful-only)
-    layout, successful_paths, _ = load_grid(data_dir, grid_id, effort=effort)
+    layout, successful_paths, _ = load_grid(data_dir, grid_id, effort=effort, skip_invalid_actions=skip_invalid_actions)
     if not successful_paths:
         print(f"  Grid {grid_id}: no successful trajectories — skipping")
         return None
@@ -94,7 +94,7 @@ def run_grid_trex(data_dir, grid_id, plots_dir, effort="low",
 
     # Load all trajectories (successful + unsuccessful) for T-REX
     all_paths, success_flags, all_traj_ids = load_all_trajectories(
-        data_dir, grid_id, layout, effort=effort
+        data_dir, grid_id, layout, effort=effort, skip_invalid_actions=skip_invalid_actions
     )
     n_success = sum(success_flags)
     n_fail    = len(all_paths) - n_success
@@ -151,7 +151,7 @@ def run_grid_trex(data_dir, grid_id, plots_dir, effort="low",
 
 
 def main(data_dir, effort="low", clip_len=10, n_pairs=5000, lr=1e-3,
-         hidden_dim=64, save_model=False):
+         hidden_dim=64, save_model=False, skip_invalid_actions: bool = False):
     data_dir = Path(data_dir).resolve()
     plots_dir = data_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
@@ -179,6 +179,7 @@ def main(data_dir, effort="low", clip_len=10, n_pairs=5000, lr=1e-3,
             data_dir, gid, plots_dir,
             effort=effort, clip_len=clip_len, n_pairs=n_pairs,
             lr=lr, hidden_dim=hidden_dim, save_model=save_model,
+            skip_invalid_actions=skip_invalid_actions,
         )
         if res is not None:
             all_results.append(res)

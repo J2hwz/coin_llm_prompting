@@ -97,13 +97,15 @@ def _find_symbol(grid_state_rows, symbol):
     return None
 
 
-def build_path(steps):
+def build_path(steps, skip_invalid_actions: bool = False):
     """Reconstruct (col, row_from_top) path from JSON steps."""
     path = []
     for step in steps:
         pos = _find_symbol(step.get("grid_state", []), "A")
         if pos is None:
             break
+        if skip_invalid_actions and path and pos == path[-1]:
+            continue  # wall bump — agent didn't move
         path.append(pos)
     if steps and path:
         last_action = steps[-1].get("agent_action", "").upper()
@@ -120,7 +122,7 @@ def is_successful(steps, layout):
     return tuple(layout["goal_pos"]) in path
 
 
-def load_grid(data_dir, grid_id, effort="low"):
+def load_grid(data_dir, grid_id, effort="low", skip_invalid_actions: bool = False):
     """Load layout and all successful trajectory paths for one grid."""
     data_dir = Path(data_dir)
     layout_files = list(data_dir.glob(f"*_grid{grid_id}_coin_layout.json"))
@@ -138,7 +140,7 @@ def load_grid(data_dir, grid_id, effort="low"):
             data = json.load(f)
         steps = data.get("steps", [])
         if is_successful(steps, layout):
-            successful_paths.append(build_path(steps))
+            successful_paths.append(build_path(steps, skip_invalid_actions=skip_invalid_actions))
             traj_ids.append(traj_id)
 
     return layout, successful_paths, traj_ids
@@ -202,9 +204,9 @@ def _grid_to_json(score):
 
 # ── Per-grid processing ───────────────────────────────────────────────────────
 
-def run_grid(data_dir, grid_id, plots_dir, mode="both", effort="low"):
+def run_grid(data_dir, grid_id, plots_dir, mode="both", effort="low", skip_invalid_actions: bool = False):
     """Run all algorithms on one grid, save plots, return (results, csv_rows)."""
-    layout, paths, traj_ids = load_grid(data_dir, grid_id, effort=effort)
+    layout, paths, traj_ids = load_grid(data_dir, grid_id, effort=effort, skip_invalid_actions=skip_invalid_actions)
 
     if not paths:
         print(f"  Grid {grid_id}: no successful trajectories — skipping")
@@ -402,7 +404,7 @@ def plot_manhattan_summary(all_results, plots_dir, mode="both"):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def main(data_dir, mode="both", effort="low"):
+def main(data_dir, mode="both", effort="low", skip_invalid_actions: bool = False):
     data_dir  = Path(data_dir).resolve()
     plots_dir = data_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
@@ -426,7 +428,7 @@ def main(data_dir, mode="both", effort="low"):
     all_results = {}
     all_csv_rows = []
     for gid in grid_ids:
-        result = run_grid(data_dir, gid, plots_dir, mode=mode, effort=effort)
+        result = run_grid(data_dir, gid, plots_dir, mode=mode, effort=effort, skip_invalid_actions=skip_invalid_actions)
         if result is not None:
             res, rows = result
             all_results[gid] = res

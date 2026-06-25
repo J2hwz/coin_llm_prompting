@@ -535,7 +535,7 @@ def _argmax_json(score_grid, fallback=(0, 0)):
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def load_all_trajectories(data_dir, grid_id, layout, effort="low"):
+def load_all_trajectories(data_dir, grid_id, layout, effort="low", skip_invalid_actions: bool = False):
     """Load every trajectory file for a grid, regardless of success.
 
     Unlike load_grid() in run_algorithms.py, which filters to successful
@@ -572,7 +572,7 @@ def load_all_trajectories(data_dir, grid_id, layout, effort="low"):
         with open(tf) as f:
             data = _json.load(f)
         steps = data.get("steps", [])
-        path = build_path(steps)
+        path = build_path(steps, skip_invalid_actions=skip_invalid_actions)
         if not path:
             continue
         paths.append(path)

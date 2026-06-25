@@ -78,6 +78,8 @@ Do not commit this file — it is already in `.gitignore`.
 │       ├── trajectory_generator/    # Step loop
 │       ├── datatypes.py             # Step, Trajectory, Action data structures
 │       └── llm_interface.py         # LiteLLM API wrapper
+├── scripts/
+│   └── finetune_coin_sft.py         # Fine-tune a model on SFT data via Together AI
 ├── environment.yml                  # Conda environment and dependencies
 ├── pyproject.toml                   # Package metadata and CLI entry point
 └── .env                             # API keys (not committed)
@@ -160,6 +162,7 @@ Agent variants:
 | `PartiallyObservableLLMAgent` | Uses fog of war, maintains action history |
 | `PartiallyObservableWithNoteLLMAgent` | Can write notes carried across steps |
 | `PartiallyObservableWithChatHistoryLLMAgent` | Maintains full chat history with the model |
+| `CoinAStarAgent` | Oracle A* agent that visits the coin before the goal; used for SFT data generation |
 
 ### 3. API call
 
@@ -248,7 +251,48 @@ The `algorithms/` package infers which intermediate cell an agent was heading to
 python algorithms/run_algorithms.py <data_dir> [--mode {individual,pooled,both}]
 ```
 
+Pass `--skip-invalid-actions` to either entry point to discard wall-collision steps (steps where the agent's position did not change) before they are passed to the algorithms:
+
+```bash
+python algorithms/run_algorithms.py <data_dir> --skip-invalid-actions
+python algorithms/run_trex.py <data_dir> --skip-invalid-actions
+```
+
 See [`algorithms/algorithms.md`](algorithms/algorithms.md) for full documentation, input format, and output schema. The algorithms are compatible with output from `get_multiple_trajectories_coin_env`.
+
+---
+
+## Fine-tuning
+
+`generate_sft_dataset` generates a JSONL dataset of optimal coin-then-goal trajectories using `CoinAStarAgent`. Each line is one step formatted as a single-turn chat record matching the prompt format used by `LLMAgent` at inference time, so train and inference distributions are identical:
+
+```json
+{"messages": [
+  {"role": "user",      "content": "<full rendered template + grid>"},
+  {"role": "assistant", "content": "{\"action\": \"RIGHT\"}"}
+]}
+```
+
+By default it generates 100 episodes per (grid size × complexity) combination across 3 sizes and 4 complexities (1,200 episodes total):
+
+```bash
+coinenv-cli generate_sft_dataset \
+  --num-episodes-per-combination 100 \
+  --grid-sizes 7 9 11 \
+  --grid-complexities 0.0 0.2 0.4 0.6 \
+  --output-path sft/oracle_combined.jsonl
+```
+
+Fine-tune on Together AI using `scripts/finetune_coin_sft.py`:
+
+```bash
+python scripts/finetune_coin_sft.py \
+  --training-file data/sft/oracle_combined.jsonl \
+  --base-model openai/gpt-oss-20b \
+  --suffix coinenv-v1
+```
+
+The script uploads the JSONL, waits for processing, runs LoRA fine-tuning, polls until completion, and prints the litellm-ready model name. Pass `--dry-run` to validate the upload without starting training.
 
 ---
 
@@ -344,6 +388,8 @@ Each run produces:
 | `src/coinenv/commands/get_trajectory/compact_json_encoder.py` | JSON encoder that keeps small containers on one line |
 | `src/coinenv/agents/llm_agent.py` | Builds prompts, calls API, parses actions |
 | `src/coinenv/agents/alpha_start_agent.py` | A* optimal baseline agent |
+| `src/coinenv/agents/coin_astar_agent.py` | A* oracle that visits coin before goal (used for SFT data) |
+| `scripts/finetune_coin_sft.py` | Upload JSONL and run LoRA fine-tuning on Together AI |
 | `src/coinenv/llm_interface.py` | LiteLLM API wrapper with retries and cost tracking |
 | `src/coinenv/templates/` | Jinja2 prompt templates |
 | `src/coinenv/trajectory_generator/trajectory_generator.py` | Step-by-step environment loop |
