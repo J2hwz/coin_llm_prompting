@@ -101,6 +101,7 @@ The package exposes a `coinenv-cli` command after installation. The entry point 
 | `augment_from_layouts` | Generate trajectories on ISO-difficulty augmented variants of saved layouts |
 | `reshuffle_walls_from_layouts` | Regenerate wall layouts (same complexity, fixed anchors) and collect trajectories |
 | `upload_trajectories_dir` | Push saved trajectories to HuggingFace Hub |
+| `generate_sft_dataset` | Generate a JSONL Supervised Fine-Tuning dataset from optimal coin-then-goal trajectories |
 
 All output paths are relative to the `data/` folder at the project root — specify just a filename or subfolder name:
 

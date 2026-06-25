@@ -5,7 +5,7 @@ import json
 import logging
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from itertools import product
+from itertools import cycle, product
 from pathlib import Path
 from typing import Literal
 
@@ -14,6 +14,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizer
 from minigrid.core.world_object import Ball, Goal, Wall
 
+from coinenv.agents.coin_astar_agent import CoinAStarAgent
 from coinenv.agents.llm_agent import LLMAgent
 from coinenv.commands.get_trajectory.compact_json_encoder import CompactJSONEncoder
 from coinenv.commands.get_trajectory.get_trajectory_utils import (
@@ -3373,4 +3374,218 @@ def upload_trajectories_dir(
         hf_token=hf_token,
         repo_type="dataset",
         num_workers=num_workers,
+    )
+
+
+# =============================================================================
+# Supervised Fine-Tuning (SFT) dataset generation
+# =============================================================================
+
+TEMPLATES_DIR = Path(__file__).parents[2] / "templates"
+_ACTION_INT_TO_NAME = {0: "LEFT", 1: "RIGHT", 2: "UP", 3: "DOWN"}
+
+
+def _split_template_for_sft(template_path: Path) -> tuple[str, str]:
+    """Split a Jinja2 template into (system_prompt, user_content_prefix).
+
+    Splits at the literal '\\n# Inputs\\n' marker. Everything before becomes the
+    system prompt (static per dataset). The user content prefix is always
+    'Current grid state:\\n\\n', to be followed by the rendered grid text.
+
+    Raises ValueError if the marker is not found in the template.
+    """
+    raw = template_path.read_text(encoding="utf-8")
+    marker = "\n# Inputs\n"
+    if marker not in raw:
+        raise ValueError(
+            f"Template {template_path} does not contain the '\\n# Inputs\\n' split marker."
+        )
+    system_part, _ = raw.split(marker, maxsplit=1)
+    return system_part.strip(), "Current grid state:\n\n"
+
+
+def generate_sft_dataset(
+    num_episodes: int = 100,
+    grid_sizes: list[int] = [11],
+    grid_complexities: list[float] = [0.8],
+    coin_placement: Literal["random", "dead_end"] = "random",
+    place_at_dead_ends: bool = False,
+    target_dead_ends: int | None = None,
+    min_manhattan_distance: int = 3,
+    max_attempts: int = 200,
+    template_name: str = "grid_full_observability_hidden_goals.j2",
+    output_path: str = "sft_dataset.jsonl",
+    seed: int = 42,
+) -> None:
+    """Generate a JSONL Supervised Fine-Tuning (SFT) dataset from optimal coin-then-goal trajectories.
+
+    Each line in the output file is one step from a CoinAStarAgent trajectory,
+    formatted as a Together AI chat-messages record:
+        {"messages": [
+            {"role": "system", "content": "<static task instructions>"},
+            {"role": "user",   "content": "Current grid state:\\n\\n<grid text>"},
+            {"role": "assistant", "content": "{\"action\": \"RIGHT\"}"}
+        ]}
+
+    The oracle agent (CoinAStarAgent) plans start→coin then coin→goal via A*.
+    Every action it selects is guaranteed to be in the optimal action set used
+    by the analysis pipeline (coin_trajectory_analysis.py).
+
+    Args:
+        num_episodes: Number of environments (trajectories) to generate.
+        grid_sizes: Grid sizes to cycle over across episodes.
+        grid_complexities: Complexities to cycle over across episodes.
+        coin_placement: How to place the coin — "random" (any open cell) or
+            "dead_end" (prefer dead-end cells, fall back to random).
+        place_at_dead_ends: If True, agent/goal are also placed at dead ends.
+        target_dead_ends: If set, only accept grids with exactly this many dead ends.
+        min_manhattan_distance: Minimum Manhattan distance between agent, goal,
+            and coin positions.
+        max_attempts: Max retries to find a valid environment per episode.
+        template_name: Jinja2 template file name (must contain '\\n# Inputs\\n').
+        output_path: Output JSONL path (relative to DATA_DIR or absolute).
+        seed: Base random seed. Each episode uses seed + episode_idx.
+    """
+    output_path_resolved = _resolve_output(output_path)
+    template_path = TEMPLATES_DIR / template_name
+    system_prompt, user_prefix = _split_template_for_sft(template_path)
+
+    random.seed(seed)
+    np.random.seed(seed)
+
+    size_cycle = cycle(grid_sizes)
+    complexity_cycle = cycle(grid_complexities)
+
+    total_steps = 0
+    skipped = 0
+
+    output_path_resolved.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path_resolved, "w", encoding="utf-8") as f:
+        for episode_idx in tqdm(range(num_episodes), desc="Generating SFT episodes"):
+            grid_size = next(size_cycle)
+            grid_complexity = next(complexity_cycle)
+            rng_seed = seed + episode_idx
+
+            np.random.seed(rng_seed)
+            random.seed(rng_seed)
+
+            # Build a valid coin environment (retry until constraints are met)
+            base_env = None
+            coin_pos = None
+
+            for _ in range(max_attempts):
+                candidate = CoinNavigationEnv(
+                    size=grid_size,
+                    complexity=grid_complexity,
+                    place_at_dead_ends=place_at_dead_ends,
+                )
+                candidate.reset()
+
+                if (
+                    target_dead_ends is not None
+                    and len(get_all_dead_ends(candidate)) != target_dead_ends
+                ):
+                    candidate.close()
+                    continue
+
+                start = tuple(candidate.agent_pos)
+                goal = tuple(candidate.goal_pos)
+                excluded = {start, goal}
+
+                if manhattan_distance(start, goal) < min_manhattan_distance:
+                    candidate.close()
+                    continue
+
+                # Resolve coin position
+                if coin_placement == "dead_end":
+                    raw_positions = [
+                        (x, y)
+                        for (x, y) in get_all_dead_ends(candidate)
+                        if (x, y) not in excluded
+                    ]
+                    if not raw_positions:
+                        raw_positions = [
+                            (x, y)
+                            for x in range(1, candidate.width - 1)
+                            for y in range(1, candidate.height - 1)
+                            if candidate.grid.get(x, y) is None and (x, y) not in excluded
+                        ]
+                else:
+                    raw_positions = [
+                        (x, y)
+                        for x in range(1, candidate.width - 1)
+                        for y in range(1, candidate.height - 1)
+                        if candidate.grid.get(x, y) is None and (x, y) not in excluded
+                    ]
+
+                valid_positions = [
+                    p
+                    for p in raw_positions
+                    if manhattan_distance(start, p) >= min_manhattan_distance
+                    and manhattan_distance(goal, p) >= min_manhattan_distance
+                ]
+
+                if not valid_positions:
+                    candidate.close()
+                    continue
+
+                coin_pos = random.choice(valid_positions)
+                candidate.put_obj(Ball("yellow"), *coin_pos)
+                base_env = candidate
+                break
+
+            if base_env is None:
+                logger.warning(
+                    f"Episode {episode_idx}: could not build a valid env after "
+                    f"{max_attempts} attempts — skipping."
+                )
+                skipped += 1
+                continue
+
+            text_env = FullObservabilityTextWrapper(base_env)
+            agent = CoinAStarAgent()
+
+            # Get initial observation without resetting (reset would lose the coin)
+            grid_text = text_env.observation(base_env.gen_obs())
+
+            terminated = False
+            truncated = False
+            step_count = 0
+            max_steps = base_env.max_steps
+
+            while not (terminated or truncated) and step_count < max_steps:
+                current_grid_text = grid_text
+
+                action_int, _ = agent.select_action(text_env)
+                action_name = _ACTION_INT_TO_NAME.get(action_int)
+                if action_name is None:
+                    logger.warning(
+                        f"Episode {episode_idx} step {step_count}: "
+                        f"CoinAStarAgent returned invalid action {action_int} — stopping episode."
+                    )
+                    break
+
+                record = {
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prefix + current_grid_text},
+                        {"role": "assistant", "content": json.dumps({"action": action_name})},
+                    ]
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                total_steps += 1
+
+                grid_text, _, terminated, truncated, _ = text_env.step(action_int)
+
+                # text_env.step returns the observation (str) as first element
+                # when wrapped with FullObservabilityTextWrapper; re-render if not
+                if not isinstance(grid_text, str):
+                    grid_text = text_env.observation(base_env.gen_obs())
+
+                step_count += 1
+
+    logger.info(
+        f"Supervised Fine-Tuning (SFT) dataset written to {output_path_resolved} "
+        f"({total_steps} steps from {num_episodes - skipped}/{num_episodes} episodes, "
+        f"{skipped} skipped)."
     )

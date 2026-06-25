@@ -195,6 +195,12 @@ cython_debug/
 .github/
 WARP.md
 
+# Claude Code
+.claude/
+
+# SFT output files
+*.jsonl
+
 # Ruff stuff:
 .ruff_cache/
 
