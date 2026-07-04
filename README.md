@@ -80,6 +80,10 @@ Do not commit this file — it is already in `.gitignore`.
 │       └── llm_interface.py         # LiteLLM API wrapper
 ├── scripts/
 │   └── finetune_coin_sft.py         # Fine-tune a model on SFT data via Together AI
+├── inspection/                      # Manual debug/inspection tools (not pytest tests)
+│   ├── print_prompts.py             # Replay the full LLM prompt for each step of a trajectory
+│   ├── inspect_history_prompt.py    # Sanity-check rendered template output with seeded history
+│   └── parse_history_trajectory.ipynb  # Notebook: parse a --track-history trajectory JSON
 ├── environment.yml                  # Conda environment and dependencies
 ├── pyproject.toml                   # Package metadata and CLI entry point
 └── .env                             # API keys (not committed)
