@@ -15,7 +15,7 @@ from litellm import completion, completion_cost
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
 from coinenv.agents.alpha_start_agent import AlphaStarAgent
-from coinenv.agents.llm_agent import LLMAgent
+from coinenv.agents.llm_agent import LLMAgent, _read_coins_collected
 from coinenv.datatypes import Step, Trajectory
 from coinenv.environment_generator.env_transformations import (
     EnvTransformation,
@@ -380,6 +380,10 @@ def generate_trajectory(
             break
 
         unwrapped_env = getattr(env, "unwrapped", env)
+
+        # Capture pre-step position for history (before prompt generation)
+        pre_step_pos = tuple(int(x) for x in unwrapped_env.agent_pos)
+
         prompt = agent._generate_action_query_prompt(unwrapped_env)
         if verbose:
             logger.info(f"Step {step_count}")
@@ -428,6 +432,15 @@ def generate_trajectory(
         total_reward += float(reward)
         if "coin_collected" in info:
             metadata["coin_collected"] = info["coin_collected"]
+        if "coins_collected" in info:
+            metadata["coins_collected"] = info["coins_collected"]
+
+        # Update history after env.step() so the coins_collected value reflects
+        # the result of this action (post-step), not the state before it.
+        if getattr(agent, "track_history", False):
+            post_step_coins = _read_coins_collected(getattr(env, "unwrapped", env))
+            agent.add_to_history(action, pre_step_pos, post_step_coins)
+            metadata["history"] = agent.history.copy()
 
         steps.append(
             Step(

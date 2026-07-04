@@ -211,6 +211,7 @@ def get_trajectory(
     use_safe_reset: bool = False,
     transform_type: str = "base",
     template_name: str | None = None,
+    track_history: bool = False,
 ):
     """Generate an agent trajectory in a 2D navigation environment and save detailed results to JSON.
 
@@ -283,9 +284,9 @@ def get_trajectory(
         template_path = (
             Path(__file__).parent.parent.parent / "templates" / template_name
         )
-        agent = LLMAgent(model_name=model_name, template_path=template_path)
+        agent = LLMAgent(model_name=model_name, template_path=template_path, track_history=track_history)
     else:
-        agent = LLMAgent(model_name)
+        agent = LLMAgent(model_name, track_history=track_history)
     model_id = "/".join(model_name.split("/")[1:])
     provider = model_name.split("/")[0]
     tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -468,6 +469,7 @@ def get_trajectories(
     hf_repo_id: str | None = None,
     hf_path_prefix: str = "",
     hf_token: str | None = None,
+    track_history: bool = False,
 ):
     """Generate multiple agent trajectories across parameter combinations in parallel.
 
@@ -570,6 +572,7 @@ def get_trajectories(
                 output_path=output_path,
                 verbose=verbose,
                 enable_dynamic_max_steps=enable_dynamic_max_steps,
+                track_history=track_history,
             )
             return {"status": "success", "output_path": output_path, "params": params}
         except Exception as e:
@@ -661,6 +664,7 @@ def get_trajectories_multiple_per_grid(
     hf_token: str | None = None,
     include_transforms: bool = False,
     transform_names: list[str] | None = None,
+    track_history: bool = False,
 ):
     """Generate multiple trajectories on the same grid layout for each configuration.
 
@@ -870,6 +874,7 @@ def get_trajectories_multiple_per_grid(
                     env=env_copy,
                     use_safe_reset=True,
                     transform_type=transform_name,
+                    track_history=track_history,
                 )
                 return {
                     "status": "success",
@@ -1136,6 +1141,7 @@ def get_single_trajectory_coin_env(
     output_path: str = "get_trajectory_deadend_example_output.json",
     verbose: bool = False,
     enable_dynamic_max_steps: bool = False,
+    track_history: bool = False,
 ):
     """Generate an agent trajectory in a dead-end constrained navigation environment and save detailed results to JSON.
 
@@ -1271,7 +1277,7 @@ def get_single_trajectory_coin_env(
 
     # Load template and create agent
     template_path = Path(__file__).parent.parent.parent / "templates" / template_name
-    agent = LLMAgent(model_name=model_name, template_path=template_path)
+    agent = LLMAgent(model_name=model_name, template_path=template_path, track_history=track_history)
     model_id = "/".join(model_name.split("/")[1:])
     provider = model_name.split("/")[0]
     tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -1449,6 +1455,7 @@ def get_multiple_trajectories_coin_env(
     hf_path_prefix: str = "",
     hf_token: str | None = None,
     template_name: str = "grid_full_observability_hidden_goals.j2",
+    track_history: bool = False,
 ):
     """Generate multiple trajectories on coin environments for each size × complexity × model combination.
 
@@ -1770,6 +1777,7 @@ def get_multiple_trajectories_coin_env(
                     env=env_copy,
                     use_safe_reset=True,
                     template_name=template_name,
+                    track_history=track_history,
                 )
                 return {
                     "status": "success",
@@ -1919,6 +1927,7 @@ def get_single_trajectory_two_coin_env(
     output_path: str = "get_trajectory_two_coin_example_output.json",
     verbose: bool = False,
     enable_dynamic_max_steps: bool = False,
+    track_history: bool = False,
 ):
     """Generate an agent trajectory in a two-coin navigation environment and save results to JSON.
 
@@ -2056,7 +2065,7 @@ def get_single_trajectory_two_coin_env(
     base_env = FullObservabilityTextWrapper(base_env_unwrapped)
 
     template_path = Path(__file__).parent.parent.parent / "templates" / template_name
-    agent = LLMAgent(model_name=model_name, template_path=template_path)
+    agent = LLMAgent(model_name=model_name, template_path=template_path, track_history=track_history)
     model_id = "/".join(model_name.split("/")[1:])
     provider = model_name.split("/")[0]
     tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -2235,6 +2244,7 @@ def get_multiple_trajectories_two_coin_env(
     hf_path_prefix: str = "",
     hf_token: str | None = None,
     template_name: str = "grid_full_observability_two_coins_collect_one.j2",
+    track_history: bool = False,
 ):
     """Generate multiple trajectories on two-coin environments for each size × complexity × model combination.
 
@@ -2561,6 +2571,7 @@ def get_multiple_trajectories_two_coin_env(
                     env=env_copy,
                     use_safe_reset=True,
                     template_name=template_name,
+                    track_history=track_history,
                 )
                 return {
                     "status": "success",

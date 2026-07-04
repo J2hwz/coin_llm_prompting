@@ -22,6 +22,19 @@ from coinenv.llm_interface import BaseLLMInterface
 logger = logging.getLogger(__name__)
 
 
+def _read_coins_collected(env) -> int | None:
+    """Read the cumulative coin collection count from the environment.
+
+    Returns int for coin envs (0/1 for CoinNavigationEnv, 0/1/2 for TwoCoinNavigationEnv),
+    or None for environments with no coin mechanics.
+    """
+    if hasattr(env, "coins_collected"):
+        return env.coins_collected
+    if hasattr(env, "coin_collected"):
+        return int(env.coin_collected)
+    return None
+
+
 class LLMAgent(Agent, BaseLLMInterface):
     """An agent that uses a Language Model to select actions in a MiniGrid environment."""
 
@@ -32,12 +45,16 @@ class LLMAgent(Agent, BaseLLMInterface):
         name: Optional[str] = None,
         template_path: Optional[Path] = None,
         response_format: BaseModel = ActionResponse,
+        track_history: bool = False,
     ) -> None:
         """
         Args:
             model_name: Identifier understood by ``litellm`` (e.g. ``"gpt-4"``).
             temperature: Temperature for the model (keep at 0.0 for consistent action selection).
             name: Optional name for the agent. Defaults to class name.
+            track_history: If True, record (position, action, coins_collected) per step and
+                inject the history into each prompt. Requires a template with a
+                ``{% if history %}`` block to render it.
         """
         if template_path is None:
             template_path = (
@@ -57,6 +74,32 @@ class LLMAgent(Agent, BaseLLMInterface):
         self.total_cost = 0.0
         self.call_count = 0
         self.response_format = response_format
+        self.track_history = track_history
+        self.history: list[tuple] = []
+
+    def add_to_history(
+        self,
+        action: "Action | int",
+        position: Tuple[int, int],
+        coins_collected: int | None = None,
+    ) -> None:
+        """Append a (position, action, coins_collected) entry to the step history.
+
+        Accepts either an Action enum or a raw int action code (invalid actions
+        with value < 0 are silently skipped). coins_collected is None for non-coin
+        environments, 0/1 for CoinNavigationEnv, and 0/1/2 for TwoCoinNavigationEnv.
+        """
+        if isinstance(action, int):
+            if action < 0:
+                return
+            action_str = Action(action).to_str()
+        else:
+            action_str = action.to_str()
+        if isinstance(position[0], np.int64):
+            new_position = (int(position[1].item()), int(position[0].item()))
+        else:
+            new_position = (position[1], position[0])
+        self.history.append((new_position, action_str, coins_collected))
 
     def _get_agent_pos(self, env: MiniGridEnv | FogOfWarTextWrapper) -> Any:
         base_env = getattr(env, "unwrapped", env)
@@ -316,6 +359,10 @@ class LLMAgent(Agent, BaseLLMInterface):
             meta = self._build_base_metadata(
                 action_response.action.value, cost, logprobs_serialized
             )
+            if self.track_history:
+                coins = _read_coins_collected(base_env)
+                self.add_to_history(action_response.action, agent_pos, coins)
+                meta["history"] = self.history.copy()
             return action_response.action.value, meta
 
         except Exception as e:
@@ -341,10 +388,10 @@ class LLMAgent(Agent, BaseLLMInterface):
         if hasattr(base_env, "carrying") and base_env.carrying is not None:
             carrying_key = base_env.carrying.type == "key"
 
-        # Pass carrying_key to template (will be ignored if template doesn't use it)
         prompt = self.render_template(
             grid_state=obs_text,
             carrying_key=carrying_key,
+            history=self.history,
         )
         return prompt
 
@@ -353,6 +400,7 @@ class LLMAgent(Agent, BaseLLMInterface):
         super().reset()
         self.total_cost = 0.0
         self.call_count = 0
+        self.history = []
 
     def get_cost_summary(self) -> dict:
         """Get a summary of costs incurred by this agent.

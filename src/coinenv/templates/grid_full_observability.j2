@@ -40,6 +40,13 @@ Your final answer should be a valid JSON object provided in the following form:
 
 DO NOT INCLUDE ANY `json` or `jsonb` in your response NOR TICK MARKS LIKE THIS: ```json ```. Start with { and end with } exactly.
 
+{% if history %}
+History of previous moves:
+{% for position, action, coins_collected in history -%}
+({{ position[0] }}, {{ position[1] }}): {{ action }}{% if coins_collected is not none %}, coins collected: {{ coins_collected }}{% endif %}
+{% endfor %}
+
+{% endif %}
 # Inputs
 
 Current grid state:
