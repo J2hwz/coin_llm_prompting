@@ -1,5 +1,6 @@
 from .get_trajectory_fn import (
     augment_from_layouts,
+    generate_random_trajectories_from_layouts,
     generate_sft_dataset,
     get_trajectories,
     get_trajectories_multiple_per_grid,
@@ -22,6 +23,7 @@ __all__ = [
     "get_multiple_trajectories_two_coin_env",
     "augment_from_layouts",
     "reshuffle_walls_from_layouts",
+    "generate_random_trajectories_from_layouts",
     "upload_trajectories_dir",
     "generate_sft_dataset",
 ]

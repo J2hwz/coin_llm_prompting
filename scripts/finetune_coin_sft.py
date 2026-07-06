@@ -156,7 +156,7 @@ def main():
     print("\nTo run inference:")
     print("  coinenv-cli get_multiple_trajectories_coin_env \\")
     print(f"    --model-name {litellm_name} \\")
-    print("    --template-name grid_full_observability_hidden_goals.j2")
+    print("    --template-name grid_one_coin_control.j2")
 
 
 if __name__ == "__main__":

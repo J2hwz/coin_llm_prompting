@@ -106,6 +106,7 @@ The package exposes a `coinenv-cli` command after installation. The entry point 
 | `get_multiple_trajectories_two_coin_env` | Batch two-coin environment trajectories |
 | `augment_from_layouts` | Generate trajectories on ISO-difficulty augmented variants of saved layouts |
 | `reshuffle_walls_from_layouts` | Regenerate wall layouts (same complexity, fixed anchors) and collect trajectories |
+| `generate_random_trajectories_from_layouts` | Replay existing single-/two-coin layouts with a random-action baseline agent (no LLM calls); writes into the same layout folder |
 | `upload_trajectories_dir` | Push saved trajectories to HuggingFace Hub |
 | `generate_sft_dataset` | Generate a JSONL Supervised Fine-Tuning dataset from optimal coin-then-goal trajectories |
 
@@ -151,10 +152,10 @@ The maze is generated fresh at the start of each trajectory and not stored befor
 | Template | Used for |
 |---|---|
 | `grid_full_observability.j2` | Full observability, standard navigation |
-| `grid_full_observability_hidden_goals.j2` | Full observability with coin — agent must collect coin then reach goal |
-| `grid_full_observability_two_coins_collect_one.j2` | Two coins present; agent instructed to collect exactly one then reach goal |
-| `grid_full_observability_two_coins_collect_all.j2` | Two coins present; agent instructed to collect both then reach goal |
-| `grid_full_observability_avoid_coin.j2` | Coin present; agent instructed to avoid it and reach goal directly |
+| `grid_one_coin_control.j2` | Full observability with coin — agent must collect coin then reach goal |
+| `grid_two_coins_collect_one.j2` | Two coins present; agent instructed to collect exactly one then reach goal |
+| `grid_two_coins_collect_all.j2` | Two coins present; agent instructed to collect both then reach goal |
+| `grid_one_coin_avoid.j2` | Coin present; agent instructed to avoid it and reach goal directly |
 | `grid_partial_observability.j2` | Partial observability with action history |
 | `grid_partial_observability_with_note.j2` | Partial obs + agent note-taking |
 

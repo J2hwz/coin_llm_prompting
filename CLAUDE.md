@@ -63,7 +63,7 @@ Environment → Text Wrapper → Jinja2 Template → LiteLLM API → Pydantic Pa
 **2. Prompt construction** (`agents/llm_agent.py`, `templates/`)
 - `LLMAgent` renders a Jinja2 template with the text grid observation
 - Agent variants: `PartiallyObservableLLMAgent` (fog + action history), `PartiallyObservableWithNoteLLMAgent` (can write persistent notes), `PartiallyObservableWithChatHistoryLLMAgent` (full chat history)
-- Template selection is explicit via `--template-name`; the default for standard navigation is `grid_full_observability.j2`, for dead-end/coin envs it is `grid_full_observability_hidden_goals.j2`
+- Template selection is explicit via `--template-name`; the default for standard navigation is `grid_full_observability.j2`, for dead-end/coin envs it is `grid_one_coin_control.j2`
 
 **3. API call** (`llm_interface.py`)
 - Wraps `litellm` with structured JSON output (Pydantic `ActionResponse`), up to 5 retries with exponential backoff, and cumulative USD cost tracking

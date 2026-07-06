@@ -6,6 +6,7 @@ import tyro
 
 from coinenv.commands.get_trajectory import (
     augment_from_layouts,
+    generate_random_trajectories_from_layouts,
     generate_sft_dataset,
     get_trajectories,
     get_trajectories_multiple_per_grid,
@@ -31,6 +32,7 @@ def main():
     - get_multiple_trajectories_coin_env: Generate multiple trajectories in coin environments
     - augment_from_layouts: Load saved layout JSONs and generate trajectories on augmented variants
     - reshuffle_walls_from_layouts: Regenerate wall layouts (same complexity, fixed anchors) and collect trajectories
+    - generate_random_trajectories_from_layouts: Replay existing single-/two-coin layouts with a random-action baseline agent (no LLM calls)
     - upload_trajectories_dir: Upload a directory of trajectory/grid JSON files to Hugging Face
     - generate_sft_dataset: Generate a JSONL Supervised Fine-Tuning dataset from optimal coin-then-goal trajectories
     """
@@ -46,6 +48,7 @@ def main():
             "get_multiple_trajectories_two_coin_env": get_multiple_trajectories_two_coin_env,
             "augment_from_layouts": augment_from_layouts,
             "reshuffle_walls_from_layouts": reshuffle_walls_from_layouts,
+            "generate_random_trajectories_from_layouts": generate_random_trajectories_from_layouts,
             "upload_trajectories_dir": upload_trajectories_dir,
             "generate_sft_dataset": generate_sft_dataset,
         }

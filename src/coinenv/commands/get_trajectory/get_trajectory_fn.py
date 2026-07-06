@@ -17,11 +17,14 @@ from minigrid.core.world_object import Ball, Goal, Wall
 
 from coinenv.agents.coin_astar_agent import CoinAStarAgent
 from coinenv.agents.llm_agent import LLMAgent
+from coinenv.agents.random_agent import RandomAgent
 from coinenv.commands.get_trajectory.compact_json_encoder import CompactJSONEncoder
 from coinenv.commands.get_trajectory.get_trajectory_utils import (
     DEFAULT_TRANSFORM_NAMES,
     annotate_output_tokens,
     generate_trajectory,
+    get_astar_distance,
+    get_dynamic_max_steps,
     get_transformed_environments,
     to_dic_list,
     upload_directory_to_huggingface,
@@ -31,6 +34,7 @@ from coinenv.commands.get_trajectory.get_trajectory_utils import (
 from coinenv.commands.get_trajectory.rate_limiter import (
     RateLimiter,
 )
+from coinenv.datatypes import Action
 from coinenv.environment_generator.custom_minigrid import (
     CoinNavigationEnv,
     Simple2DNavigationEnv,
@@ -247,7 +251,7 @@ def get_trajectory(
         transform_type: Type of environment transform applied ("base", "RotateEnv",
             "ReflectEnv", "TransposeEnv", "StartGoalSwap"). Stored in grid_params.
         template_name: Jinja2 template filename to use (e.g.
-            "grid_full_observability_hidden_goals.j2"). If None, uses the LLMAgent
+            "grid_one_coin_control.j2"). If None, uses the LLMAgent
             default (grid_full_observability.j2).
 
     Returns:
@@ -284,7 +288,11 @@ def get_trajectory(
         template_path = (
             Path(__file__).parent.parent.parent / "templates" / template_name
         )
-        agent = LLMAgent(model_name=model_name, template_path=template_path, track_history=track_history)
+        agent = LLMAgent(
+            model_name=model_name,
+            template_path=template_path,
+            track_history=track_history,
+        )
     else:
         agent = LLMAgent(model_name, track_history=track_history)
     model_id = "/".join(model_name.split("/")[1:])
@@ -1136,7 +1144,7 @@ def get_single_trajectory_coin_env(
     seed: int = 42,
     reasoning_effort: Literal["low", "medium", "high"] = "low",
     model_name: str = "together_ai/openai/gpt-oss-20b",
-    template_name: str = "grid_full_observability_hidden_goals.j2",
+    template_name: str = "grid_one_coin_control.j2",
     observation_placeholders: list[str] = ["grid_state"],
     output_path: str = "get_trajectory_deadend_example_output.json",
     verbose: bool = False,
@@ -1277,7 +1285,9 @@ def get_single_trajectory_coin_env(
 
     # Load template and create agent
     template_path = Path(__file__).parent.parent.parent / "templates" / template_name
-    agent = LLMAgent(model_name=model_name, template_path=template_path, track_history=track_history)
+    agent = LLMAgent(
+        model_name=model_name, template_path=template_path, track_history=track_history
+    )
     model_id = "/".join(model_name.split("/")[1:])
     provider = model_name.split("/")[0]
     tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -1454,7 +1464,7 @@ def get_multiple_trajectories_coin_env(
     hf_repo_id: str | None = None,
     hf_path_prefix: str = "",
     hf_token: str | None = None,
-    template_name: str = "grid_full_observability_hidden_goals.j2",
+    template_name: str = "grid_one_coin_control.j2",
     track_history: bool = False,
 ):
     """Generate multiple trajectories on coin environments for each size × complexity × model combination.
@@ -1922,7 +1932,7 @@ def get_single_trajectory_two_coin_env(
     seed: int = 42,
     reasoning_effort: Literal["low", "medium", "high"] = "low",
     model_name: str = "together_ai/openai/gpt-oss-20b",
-    template_name: str = "grid_full_observability_two_coins_collect_one.j2",
+    template_name: str = "grid_two_coins_collect_one.j2",
     observation_placeholders: list[str] = ["grid_state"],
     output_path: str = "get_trajectory_two_coin_example_output.json",
     verbose: bool = False,
@@ -1936,9 +1946,9 @@ def get_single_trajectory_two_coin_env(
     are retried up to max_attempts until all constraints are satisfied.
 
     Two coins are always placed. The template_name parameter controls what objective the agent
-    is given — use grid_full_observability_two_coins_collect_one.j2 to instruct the agent to
-    collect exactly one coin, or grid_full_observability_two_coins_collect_all.j2 to collect
-    both. The avoid-coin template can also be used (grid_full_observability_avoid_coin.j2).
+    is given — use grid_two_coins_collect_one.j2 to instruct the agent to
+    collect exactly one coin, or grid_two_coins_collect_all.j2 to collect
+    both. The avoid-coin template can also be used (grid_one_coin_avoid.j2).
 
     Args:
         grid_size: Size of the square grid environment.
@@ -2065,7 +2075,9 @@ def get_single_trajectory_two_coin_env(
     base_env = FullObservabilityTextWrapper(base_env_unwrapped)
 
     template_path = Path(__file__).parent.parent.parent / "templates" / template_name
-    agent = LLMAgent(model_name=model_name, template_path=template_path, track_history=track_history)
+    agent = LLMAgent(
+        model_name=model_name, template_path=template_path, track_history=track_history
+    )
     model_id = "/".join(model_name.split("/")[1:])
     provider = model_name.split("/")[0]
     tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -2243,7 +2255,7 @@ def get_multiple_trajectories_two_coin_env(
     hf_repo_id: str | None = None,
     hf_path_prefix: str = "",
     hf_token: str | None = None,
-    template_name: str = "grid_full_observability_two_coins_collect_one.j2",
+    template_name: str = "grid_two_coins_collect_one.j2",
     track_history: bool = False,
 ):
     """Generate multiple trajectories on two-coin environments for each size × complexity × model combination.
@@ -2725,7 +2737,7 @@ def augment_from_layouts(
     hf_repo_id: str | None = None,
     hf_path_prefix: str = "",
     hf_token: str | None = None,
-    template_name: str = "grid_full_observability_hidden_goals.j2",
+    template_name: str = "grid_one_coin_control.j2",
 ):
     """Load existing grid layout JSONs and generate trajectories on augmented variants.
 
@@ -3087,7 +3099,7 @@ def reshuffle_walls_from_layouts(
     enable_rate_limit: bool = False,
     rate_limit: int = 1000,
     rate_limit_period: float = 300.0,
-    template_name: str = "grid_full_observability_hidden_goals.j2",
+    template_name: str = "grid_one_coin_control.j2",
 ) -> None:
     """Load existing coin layout JSONs and generate trajectories on wall-reshuffled variants.
 
@@ -3320,6 +3332,230 @@ def reshuffle_walls_from_layouts(
     )
 
 
+def generate_random_trajectories_from_layouts(
+    layout_dir: str,
+    num_trajectories_per_layout: int = 5,
+    max_steps_per_trajectory: int = 50,
+    enable_dynamic_max_steps: bool = False,
+    max_workers: int | None = None,
+    verbose: bool = False,
+) -> None:
+    """Generate random-baseline trajectories on existing single- or two-coin layouts.
+
+    For each ``*_layout.json`` file in ``layout_dir``, reconstructs the exact saved
+    environment (walls, agent start, goal, and coin position(s) unchanged) and runs
+    ``num_trajectories_per_layout`` independent episodes with a ``RandomAgent`` — no
+    LLM calls are made. Trajectory JSONs are written back into ``layout_dir`` itself.
+
+    Only single-coin (``CoinNavigationEnv``) and two-coin (``TwoCoinNavigationEnv``)
+    layouts are supported, auto-detected from the layout's fields (``coin_pos``/
+    ``coin_placement`` vs. ``coin_pos_1``/``coin_pos_2``).
+
+    The output JSON's ``grid_params`` and ``steps[i].grid_state``/``agent_action``
+    match the LLM trajectory format, so existing analysis scripts work unchanged, but
+    ``prompt`` and per-step token/logprob fields are omitted since there is no LLM
+    output to record; ``model_params`` is a minimal stub identifying the agent as
+    ``"random"``.
+
+    Args:
+        layout_dir: Directory containing ``*_layout.json`` files to replay. Output
+            trajectory JSONs are written into this same directory.
+        num_trajectories_per_layout: Number of independent random-agent episodes to
+            run per layout file.
+        max_steps_per_trajectory: Maximum steps per trajectory.
+        enable_dynamic_max_steps: If True, override max_steps_per_trajectory with
+            1.5x the A* optimal path length for each layout.
+        max_workers: Max parallel workers. Defaults to min(32, total_trajectories).
+        verbose: If True, print detailed logging.
+
+    Output filenames:
+        Trajectory JSONs: ``{original_stem}_random_traj{traj_id}.json``
+    """
+    layout_dir_path = Path(str(_resolve_output(layout_dir)))
+    layout_files = sorted(layout_dir_path.glob("*_layout.json"))
+    if not layout_files:
+        raise ValueError(f"No *_layout.json files found in {layout_dir_path}")
+
+    def _reconstruct_env(layout: dict):
+        """Reconstruct a live (unwrapped) env from a saved single- or two-coin layout."""
+        if "coin_pos_1" in layout and "coin_pos_2" in layout:
+            env_class = TwoCoinNavigationEnv
+        elif (
+            layout.get("coin_placement") is not None
+            or layout.get("coin_pos") is not None
+        ):
+            env_class = CoinNavigationEnv
+        else:
+            raise ValueError(
+                f"Layout {layout.get('_source_filename', '<unknown>')} has neither "
+                "coin_pos nor coin_pos_1/coin_pos_2 — only single- and two-coin "
+                "layouts are supported."
+            )
+        env = env_class(size=layout["grid_size"], complexity=layout["grid_complexity"])
+        env.reset()
+        # set_env_from_list handles '#', '_', 'A', 'G' but not coin symbols
+        env.set_env_from_list(layout["grid_layout"])
+        if env_class is TwoCoinNavigationEnv:
+            env.put_obj(Ball("yellow"), *layout["coin_pos_1"])
+            env.put_obj(Ball("yellow"), *layout["coin_pos_2"])
+        elif layout.get("coin_pos") is not None:
+            env.put_obj(Ball("yellow"), *layout["coin_pos"])
+        return env
+
+    # Build (wrapped_env, original_stem, coin_fields) tasks, one per layout file.
+    layout_tasks: list[tuple] = []
+    for layout_path in layout_files:
+        with open(layout_path) as f:
+            layout = json.load(f)
+        layout["_source_filename"] = layout_path.name
+        original_stem = layout_path.name.removesuffix("_layout.json")
+
+        env_unwrapped = _reconstruct_env(layout)
+        wrapped_env = FullObservabilityTextWrapper(env_unwrapped)
+        coin_fields = {
+            k: layout[k]
+            for k in ("coin_pos", "coin_pos_1", "coin_pos_2")
+            if k in layout
+        }
+        layout_tasks.append((wrapped_env, original_stem, coin_fields))
+
+    total_trajectories = len(layout_tasks) * num_trajectories_per_layout
+    logger.info(
+        f"Loaded {len(layout_files)} layout files. "
+        f"Generating {total_trajectories} random-agent trajectories."
+    )
+
+    def _run_random_trajectory(task: tuple) -> dict:
+        wrapped_env, original_stem, coin_fields = task
+        trajectory_results = []
+
+        for traj_id in range(num_trajectories_per_layout):
+            output_filename = f"{original_stem}_random_traj{traj_id}.json"
+            output_path = str(layout_dir_path / output_filename)
+
+            if verbose:
+                logger.info(
+                    f"Starting random trajectory: layout={original_stem}, traj={traj_id}"
+                )
+
+            try:
+                env_copy = copy.deepcopy(wrapped_env)
+                unwrapped = env_copy.unwrapped
+                unwrapped.safe_reset()
+                observation = env_copy._render()
+
+                astar_distance = get_astar_distance(env_copy, observation)
+                max_steps = (
+                    get_dynamic_max_steps(astar_distance)
+                    if enable_dynamic_max_steps
+                    else max_steps_per_trajectory
+                )
+
+                start_pos = tuple(int(x) for x in unwrapped.agent_pos)
+                goal_pos = tuple(int(x) for x in unwrapped.goal_pos)
+
+                agent = RandomAgent()
+                steps = []
+                terminated = truncated = False
+                step_id = 0
+
+                while not (terminated or truncated) and step_id < max_steps:
+                    action, _ = agent.select_action(unwrapped)
+                    action_name = Action(action).to_str()
+
+                    next_observation, _reward, terminated, truncated, info = (
+                        env_copy.step(action)
+                    )
+
+                    step_dic = {
+                        "step_id": step_id,
+                        "grid_state": observation.split("\n"),
+                        "agent_action": action_name,
+                    }
+                    if "coin_collected" in info:
+                        step_dic["coin_collected"] = info["coin_collected"]
+                    if "coins_collected" in info:
+                        step_dic["coins_collected"] = info["coins_collected"]
+                    steps.append(step_dic)
+
+                    observation = next_observation
+                    step_id += 1
+
+                grid_params = {
+                    "grid_width": unwrapped.width,
+                    "grid_height": unwrapped.height,
+                    "grid_complexity": unwrapped.complexity,
+                    "fully_observable": True,
+                    "astar_distance": astar_distance,
+                    "agent_start_coordinates": (start_pos[1], start_pos[0]),
+                    "goal_coordinates": (goal_pos[1], goal_pos[0]),
+                    "legend": env_copy.grid_cells,
+                    **coin_fields,
+                }
+                model_params = {
+                    "model_id": "random",
+                    "provider": None,
+                    "interface": "random_agent",
+                    "max_steps_per_trajectory": max_steps,
+                    "seed": traj_id,
+                }
+                out = {
+                    "grid_params": grid_params,
+                    "model_params": model_params,
+                    "steps": steps,
+                }
+                with open(output_path, "w") as f:
+                    json.dump(
+                        out, f, cls=CompactJSONEncoder, ensure_ascii=False, indent=4
+                    )
+
+                trajectory_results.append(
+                    {"status": "success", "output_path": output_path}
+                )
+            except Exception as e:
+                logger.error(f"Failed: layout={original_stem}, traj={traj_id}: {e}")
+                trajectory_results.append(
+                    {"status": "error", "error": str(e), "output_path": output_path}
+                )
+
+        return {"trajectory_results": trajectory_results}
+
+    effective_workers = (
+        max_workers if max_workers is not None else min(32, total_trajectories)
+    )
+    all_trajectory_results: list[dict] = []
+
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        futures = {
+            executor.submit(_run_random_trajectory, task): task for task in layout_tasks
+        }
+        for future in tqdm(
+            as_completed(futures),
+            total=len(layout_tasks),
+            desc="Random baseline",
+            unit="layout",
+        ):
+            task = futures[future]
+            try:
+                result = future.result()
+                all_trajectory_results.extend(result["trajectory_results"])
+                failures = [
+                    r for r in result["trajectory_results"] if r["status"] != "success"
+                ]
+                for failure in failures:
+                    tqdm.write(
+                        f"Failed for layout {task[1]}: {failure.get('error', 'Unknown error')}"
+                    )
+            except Exception as e:
+                tqdm.write(f"Exception for layout {task[1]}: {e}")
+                all_trajectory_results.append({"status": "error", "error": str(e)})
+
+    success_count = sum(1 for r in all_trajectory_results if r["status"] == "success")
+    logger.info(
+        f"Completed {success_count}/{total_trajectories} random-baseline trajectories successfully."
+    )
+
+
 def upload_trajectories_dir(
     directory: str,
     hf_repo_id: str,
@@ -3406,7 +3642,7 @@ def generate_sft_dataset(
     target_dead_ends: int | None = None,
     min_manhattan_distance: int = 3,
     max_attempts: int = 200,
-    template_name: str = "grid_full_observability_hidden_goals.j2",
+    template_name: str = "grid_one_coin_control.j2",
     output_path: str = "sft_dataset.jsonl",
     seed: int = 42,
 ) -> None:
@@ -3504,14 +3740,16 @@ def generate_sft_dataset(
                                 (x, y)
                                 for x in range(1, candidate.width - 1)
                                 for y in range(1, candidate.height - 1)
-                                if candidate.grid.get(x, y) is None and (x, y) not in excluded
+                                if candidate.grid.get(x, y) is None
+                                and (x, y) not in excluded
                             ]
                     else:
                         raw_positions = [
                             (x, y)
                             for x in range(1, candidate.width - 1)
                             for y in range(1, candidate.height - 1)
-                            if candidate.grid.get(x, y) is None and (x, y) not in excluded
+                            if candidate.grid.get(x, y) is None
+                            and (x, y) not in excluded
                         ]
 
                     valid_positions = [
@@ -3565,7 +3803,10 @@ def generate_sft_dataset(
                     record = {
                         "messages": [
                             {"role": "user", "content": rendered_prompt},
-                            {"role": "assistant", "content": json.dumps({"action": action_name})},
+                            {
+                                "role": "assistant",
+                                "content": json.dumps({"action": action_name}),
+                            },
                         ]
                     }
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")

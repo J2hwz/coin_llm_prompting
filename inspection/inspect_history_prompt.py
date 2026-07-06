@@ -3,7 +3,7 @@ from coinenv.agents.llm_agent import LLMAgent
 
 agent = LLMAgent(
     model_name="together_ai/openai/gpt-oss-20b",
-    template_path=Path("src/coinenv/templates/grid_full_observability_hidden_goals.j2"),
+    template_path=Path("src/coinenv/templates/grid_one_coin_control.j2"),
     track_history=True,
 )
 

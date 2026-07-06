@@ -96,7 +96,7 @@ Output model: together_ai/username/gpt-oss-20b-coinenv-v1
 To run inference:
   coinenv-cli get_multiple_trajectories_coin_env \
     --model-name together_ai/username/gpt-oss-20b-coinenv-v1 \
-    --template-name grid_full_observability_hidden_goals.j2
+    --template-name grid_one_coin_control.j2
 ```
 
 ---
@@ -145,11 +145,11 @@ coinenv-cli get_multiple_trajectories_coin_env \
   --output-path results/zeroshot/
 
 # 5. OOD eval — "avoid coin" template (specifics TBD)
-#    Uses grid_full_observability_avoid_coin.j2
+#    Uses grid_one_coin_avoid.j2
 #    Tests whether the model learned the task or just memorised coin-collection trajectories
 coinenv-cli get_multiple_trajectories_coin_env \
   --model-name together_ai/username/gpt-oss-20b-coinenv-v1 \
-  --template-name grid_full_observability_avoid_coin.j2 \
+  --template-name grid_one_coin_avoid.j2 \
   --output-path results/finetuned_avoid_coin/
 ```
 

@@ -2,17 +2,19 @@
 plot_trajectories.py
 
 CLI: given a folder of layout + trajectory JSON files, produce two outputs per
-layout in <folder>/plots/:
+layout in <folder>/plots/, tagged with the requested effort so different efforts
+(e.g. "low" vs "random") don't overwrite each other:
 
-    {prefix}_panels.png   — one panel per trajectory (N panels in a 5-col grid)
-    {prefix}_heatmap.png  — cell visit-frequency heatmap across all trajectories
+    {prefix}_{effort}_panels.png   — one panel per trajectory (N panels in a 5-col grid)
+    {prefix}_{effort}_heatmap.png  — cell visit-frequency heatmap across all trajectories
 
 Usage:
-    python plot_trajectories.py <data_folder>
+    python plot_trajectories.py <data_folder> [effort]
 
 Naming convention expected in <data_folder>:
-    *_layout.json          — one per layout
-    *_low_traj{N}.json     — trajectories for that layout (N = 0, 1, 2, …)
+    *_layout.json               — one per layout
+    *_{effort}_traj{N}.json     — trajectories for that layout (N = 0, 1, 2, …),
+                                   effort defaults to "low" if not specified
 """
 
 import json
@@ -369,8 +371,9 @@ def process_layout(layout_path: Path, out_dir: Path, effort: str = "low"):
                               cc_step=cc_step, reached_goal=reached_goal,
                               traj_id=traj_id))
 
-    plot_panels(layout, traj_data, prefix, out_dir)
-    plot_heatmap(layout, traj_data, prefix, out_dir)
+    plot_prefix = f"{prefix}_{effort}"
+    plot_panels(layout, traj_data, plot_prefix, out_dir)
+    plot_heatmap(layout, traj_data, plot_prefix, out_dir)
 
 
 def main(folder: Path, effort: str = "low"):
