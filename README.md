@@ -107,6 +107,8 @@ The package exposes a `coinenv-cli` command after installation. The entry point 
 | `augment_from_layouts` | Generate trajectories on ISO-difficulty augmented variants of saved layouts |
 | `reshuffle_walls_from_layouts` | Regenerate wall layouts (same complexity, fixed anchors) and collect trajectories |
 | `generate_random_trajectories_from_layouts` | Replay existing single-/two-coin layouts with a random-action baseline agent (no LLM calls); writes into the same layout folder |
+| `generate_random_trajectories_from_new_grids` | Procedurally generate fresh single-coin grids across a size x complexity sweep and run a random-action baseline agent on each (no LLM calls); persists generated layouts alongside trajectories |
+| `generate_random_trajectories_from_new_two_coin_grids` | Procedurally generate fresh two-coin grids across a size x complexity sweep and run a random-action baseline agent on each (no LLM calls); persists generated layouts alongside trajectories |
 | `upload_trajectories_dir` | Push saved trajectories to HuggingFace Hub |
 | `generate_sft_dataset` | Generate a JSONL Supervised Fine-Tuning dataset from optimal coin-then-goal trajectories |
 
