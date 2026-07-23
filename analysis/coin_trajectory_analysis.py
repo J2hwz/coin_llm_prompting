@@ -45,7 +45,44 @@ from analysis.visualization import (
 )
 
 COIN_SYMBOL = "C"
+WALL_SYMBOL = "#"
 KNOWN_EFFORTS = {"low", "medium"}
+
+_ACTION_DELTAS = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
+
+# Transform token (from filename) → coarse trajectory category
+TRANSFORM_TO_CATEGORY = {
+    "base": "base",
+    "ReflectEnv": "reflect",
+    "RotateEnv": "rotate",
+    "TransposeEnv": "transpose",
+    "StartGoalSwap": "start_goal_swap",
+}
+
+# Containing directory → category, fallback for unrecognised transform tokens
+DIR_TO_CATEGORY = {
+    "control": "base",
+    "augmentations": "unknown_transform",
+    "random_starts": "random_starts",
+    "reshuffled": "reshuffled_walls",
+}
+
+
+def infer_trajectory_category(filepath: Path, transform_type: str) -> str:
+    """Categorise a trajectory as base / reflect / rotate / transpose /
+    start_goal_swap / random_starts / reshuffled_walls.
+
+    The filename transform token is authoritative; the containing directory
+    name is only used as a fallback for unrecognised tokens.
+    """
+    category = TRANSFORM_TO_CATEGORY.get(transform_type)
+    if category:
+        return category
+    if transform_type.startswith("RandomStart"):
+        return "random_starts"
+    if transform_type.startswith("walls"):
+        return "reshuffled_walls"
+    return DIR_TO_CATEGORY.get(filepath.parent.name, "unknown")
 
 
 # =============================================================================
@@ -58,11 +95,15 @@ class CoinTrajectoryGridParams(TrajectoryGridParams):
     """Grid parameters extended with coin position."""
 
     coin_pos: Optional[tuple[int, int]] = None
-    start_to_coin_distance: int = 0       # A* dist: start → coin
-    coin_to_goal_distance: int = 0       # A* dist: coin → goal
+    start_to_coin_distance: int = 0       # A* dist: start → coin (-1 if unreachable)
+    coin_to_goal_distance: int = 0       # A* dist: coin → goal (-1 if unreachable)
     start_to_goal_via_coin_distance: int = 0      # = start_to_coin_distance + coin_to_goal_distance
-    start_to_goal_distance: int = 0    # A* dist: start → goal (ignoring coin)
+    start_to_goal_distance: int = 0    # A* dist: start → goal (ignoring coin, -1 if unreachable)
     coin_detour_distance: int = 0      # min dist from coin to any cell on optimal start→goal path
+    coin_reachable_from_start: bool = True
+    goal_reachable_from_start: bool = True
+    goal_reachable_from_coin: bool = True
+    grid_layout: Optional[list[list[str]]] = None  # wall layout, for invalid-action detection
 
 
 @dataclass
@@ -76,6 +117,7 @@ class CoinLightweightTrajectory:
     coin_collection_step: Optional[int]  # step index when coin was collected, or None
     reasoning_effort: str = "low"
     transform_type: str = "base"
+    trajectory_category: str = "base"
     trajectory_id: int = 0
 
     @property
@@ -107,11 +149,15 @@ class CoinGridTrajectoryMetrics:
     instance_id: int
     reasoning_effort: str
     transform_type: str
+    trajectory_category: str
     start_to_coin_distance: int
     coin_to_goal_distance: int
     start_to_goal_via_coin_distance: int
     start_to_goal_distance: int    # direct start→goal (ignoring coin)
     coin_detour_distance: int      # min dist from coin to optimal start→goal path
+    coin_reachable_from_start: int
+    goal_reachable_from_start: int
+    goal_reachable_from_coin: int
 
     # --- Success breakdown ---
     num_trajectories: int
@@ -159,6 +205,7 @@ class CoinGridTrajectoryMetrics:
     mean_cell_revisits: float = 0.0        # steps landing on any previously visited cell
     mean_immediate_revisits: float = 0.0   # steps returning to the immediately preceding cell
     mean_coin_oscillations: float = 0.0    # steps oscillating through the coin cell
+    mean_invalid_actions: float = 0.0      # wall-bump actions (agent stays in the same cell)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -168,11 +215,15 @@ class CoinGridTrajectoryMetrics:
             "instance_id": self.instance_id,
             "reasoning_effort": self.reasoning_effort,
             "transform_type": self.transform_type,
+            "trajectory_category": self.trajectory_category,
             "start_to_coin_distance": self.start_to_coin_distance,
             "coin_to_goal_distance": self.coin_to_goal_distance,
             "start_to_goal_via_coin_distance": self.start_to_goal_via_coin_distance,
             "start_to_goal_distance": self.start_to_goal_distance,
             "coin_detour_distance": self.coin_detour_distance,
+            "coin_reachable_from_start": self.coin_reachable_from_start,
+            "goal_reachable_from_start": self.goal_reachable_from_start,
+            "goal_reachable_from_coin": self.goal_reachable_from_coin,
             "num_trajectories": self.num_trajectories,
             "num_coin_collected": self.num_coin_collected,
             "num_goal_after_coin": self.num_goal_after_coin,
@@ -207,6 +258,7 @@ class CoinGridTrajectoryMetrics:
             "mean_cell_revisits": self.mean_cell_revisits,
             "mean_immediate_revisits": self.mean_immediate_revisits,
             "mean_coin_oscillations": self.mean_coin_oscillations,
+            "mean_invalid_actions": self.mean_invalid_actions,
         }
 
 
@@ -268,12 +320,17 @@ def discover_coin_trajectory_files(
 ) -> dict[str, list[Path]]:
     """Discover coin trajectory files grouped by (grid_key, effort).
 
+    Recurses into subdirectories (e.g. control/, augmentations/, random_starts/,
+    reshuffled/), so a parent dir containing several variants — or several
+    sizes — is combined into one analysis.
+
     Returns:
-        Dict mapping "{size}_{comp}_{grid_id}_{effort}" to list of trajectory paths.
+        Dict mapping "{size}_{comp}_{grid_id}_{transform}_{effort}" to list of
+        trajectory paths.
     """
     grouped: dict[str, list[Path]] = defaultdict(list)
 
-    for filepath in sorted(trajectory_dir.glob("*_coin_*_traj*.json")):
+    for filepath in sorted(trajectory_dir.rglob("*_coin_*_traj*.json")):
         parsed = parse_coin_trajectory_filename(filepath.name)
         if parsed:
             key = (
@@ -399,6 +456,11 @@ def load_coin_trajectory(
     coin_to_goal_distance: int,
     start_to_goal_distance: int = 0,
     coin_detour_distance: int = 0,
+    trajectory_category: str = "base",
+    coin_reachable_from_start: bool = True,
+    goal_reachable_from_start: bool = True,
+    goal_reachable_from_coin: bool = True,
+    grid_layout: Optional[list[list[str]]] = None,
 ) -> Optional[CoinLightweightTrajectory]:
     """Load a coin trajectory file and detect coin collection from grid states."""
     try:
@@ -415,19 +477,30 @@ def load_coin_trajectory(
         transform_type = parsed["transform_type"] if parsed else "base"
         trajectory_id = parsed["trajectory_id"] if parsed else 0
 
+        # If either leg is unreachable (-1), the via-coin total is unreachable too.
+        via_coin_distance = (
+            start_to_coin_distance + coin_to_goal_distance
+            if start_to_coin_distance >= 0 and coin_to_goal_distance >= 0
+            else -1
+        )
+
         grid_params = CoinTrajectoryGridParams(
             grid_size=gp.get("grid_width", 0),
             complexity=gp.get("grid_complexity", 0.0),
             grid_id=grid_id,
-            astar_distance=start_to_coin_distance + coin_to_goal_distance,
+            astar_distance=via_coin_distance,
             agent_start=agent_start,
             goal=goal_pos,
             coin_pos=coin_pos,
             start_to_coin_distance=start_to_coin_distance,
             coin_to_goal_distance=coin_to_goal_distance,
-            start_to_goal_via_coin_distance=start_to_coin_distance + coin_to_goal_distance,
+            start_to_goal_via_coin_distance=via_coin_distance,
             start_to_goal_distance=start_to_goal_distance,
             coin_detour_distance=coin_detour_distance,
+            coin_reachable_from_start=coin_reachable_from_start,
+            goal_reachable_from_start=goal_reachable_from_start,
+            goal_reachable_from_coin=goal_reachable_from_coin,
+            grid_layout=grid_layout,
         )
 
         raw_steps = data.get("steps", [])
@@ -449,7 +522,7 @@ def load_coin_trajectory(
         if steps:
             pos = steps[-1].agent_position
             last_action = steps[-1].agent_action.upper()
-            dx, dy = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}.get(last_action, (0, 0))
+            dx, dy = _ACTION_DELTAS.get(last_action, (0, 0))
             final_pos = (pos[0] + dx, pos[1] + dy)
             reached_goal = (final_pos == goal_pos)
 
@@ -461,6 +534,7 @@ def load_coin_trajectory(
             coin_collection_step=coin_collection_step,
             reasoning_effort=effort,
             transform_type=transform_type,
+            trajectory_category=trajectory_category,
             trajectory_id=trajectory_id,
         )
 
@@ -551,8 +625,29 @@ _OPPOSITE  = {"UP": "DOWN", "DOWN": "UP",   "LEFT": "RIGHT", "RIGHT": "LEFT"}
 _LEFT_TURN = {"UP": "LEFT", "DOWN": "RIGHT", "LEFT": "DOWN",  "RIGHT": "UP"}
 
 
+def is_invalid_action(
+    pos: tuple[int, int],
+    action: str,
+    grid_layout: list[list[str]],
+) -> bool:
+    """True if taking `action` from `pos` runs into a wall or out of bounds.
+
+    Unrecognised action strings are not wall bumps (they are already penalised
+    in action accuracy).
+    """
+    delta = _ACTION_DELTAS.get(action)
+    if delta is None:
+        return False
+    tx, ty = pos[0] + delta[0], pos[1] + delta[1]
+    if ty < 0 or ty >= len(grid_layout) or tx < 0 or tx >= len(grid_layout[ty]):
+        return True
+    return grid_layout[ty][tx] == WALL_SYMBOL
+
+
 def compute_trajectory_movement_stats(
-    traj: CoinLightweightTrajectory,
+    steps: list[TrajectoryStep],
+    grid_layout: Optional[list[list[str]]],
+    coin_positions: set[tuple[int, int]],
 ) -> dict[str, int]:
     """Absolute action counts, relative direction counts, and revisit counts.
 
@@ -562,9 +657,12 @@ def compute_trajectory_movement_stats(
     Revisit counts:
     - num_cell_revisits:     steps landing on any previously visited cell
     - num_immediate_revisits: steps returning to the immediately preceding cell (double-back)
-    - num_coin_oscillations: steps oscillating through the coin cell — either arriving at the
-                             coin cell (previously visited) or departing the coin cell to a
+    - num_coin_oscillations: steps oscillating through a coin cell — either arriving at a
+                             coin cell (previously visited) or departing a coin cell to a
                              previously-visited adjacent cell
+    - num_invalid_actions:   actions that run into a wall / out of bounds, leaving the agent
+                             in the same cell (checked against the grid layout; falls back to
+                             same-cell comparison when no layout is available)
     """
     action_counts: dict[str, int] = {"UP": 0, "DOWN": 0, "LEFT": 0, "RIGHT": 0}
     rel_counts: dict[str, int] = {"front": 0, "left_turn": 0, "right_turn": 0, "back": 0}
@@ -573,18 +671,26 @@ def compute_trajectory_movement_stats(
     num_cell_revisits = 0
     num_immediate_revisits = 0
     num_coin_oscillations = 0
-    coin_pos = traj.grid_params.coin_pos
+    num_invalid_actions = 0
 
-    for i, step in enumerate(traj.steps):
+    for i, step in enumerate(steps):
         action = step.agent_action.upper()
         pos = step.agent_position
 
         if action in action_counts:
             action_counts[action] += 1
 
+        if grid_layout is not None:
+            if is_invalid_action(pos, action, grid_layout):
+                num_invalid_actions += 1
+        elif i + 1 < len(steps) and steps[i + 1].agent_position == pos:
+            # No layout: a blocked move shows as the next observation having the
+            # same agent position. The final step cannot be classified this way.
+            num_invalid_actions += 1
+
         if i > 0:
-            prev_pos = traj.steps[i - 1].agent_position
-            prev_action = traj.steps[i - 1].agent_action.upper()
+            prev_pos = steps[i - 1].agent_position
+            prev_action = steps[i - 1].agent_action.upper()
 
             # Relative direction
             if prev_action in action_counts and action in action_counts:
@@ -599,11 +705,13 @@ def compute_trajectory_movement_stats(
 
             # Double-back: returned to the cell occupied two steps ago, having actually
             # moved away in between (excludes consecutive blocked/no-op moves)
-            if i >= 2 and pos == traj.steps[i - 2].agent_position and pos != prev_pos:
+            if i >= 2 and pos == steps[i - 2].agent_position and pos != prev_pos:
                 num_immediate_revisits += 1
 
-            # Coin oscillation: move to/from the coin cell landing on a previously visited cell
-            if (pos == coin_pos and pos in visited) or (prev_pos == coin_pos and pos in visited):
+            # Coin oscillation: move to/from a coin cell landing on a previously visited cell
+            if (pos in coin_positions and pos in visited) or (
+                prev_pos in coin_positions and pos in visited
+            ):
                 num_coin_oscillations += 1
 
         # General cell revisit
@@ -623,6 +731,7 @@ def compute_trajectory_movement_stats(
         "num_cell_revisits":        num_cell_revisits,
         "num_immediate_revisits":   num_immediate_revisits,
         "num_coin_oscillations":    num_coin_oscillations,
+        "num_invalid_actions":      num_invalid_actions,
     }
 
 
@@ -701,7 +810,7 @@ def compute_coin_spl(
     optimal_total_distance: int,
 ) -> float:
     """SPL using full_success (coin + goal) and total optimal path length."""
-    if not trajectories or optimal_total_distance == 0:
+    if not trajectories or optimal_total_distance <= 0:
         return 0.0
 
     spls = []
@@ -760,7 +869,9 @@ def compute_single_trajectory_row(
     success = traj.reached_goal and traj.coin_collected
     spl = (L_star / max(L_star, L)) if (success and L_star > 0) else 0.0
 
-    move = compute_trajectory_movement_stats(traj)
+    move = compute_trajectory_movement_stats(
+        traj.steps, traj.grid_params.grid_layout, {traj.grid_params.coin_pos}
+    )
 
     return {
         "trajectory_id":          traj.trajectory_id,
@@ -770,11 +881,15 @@ def compute_single_trajectory_row(
         "density":                gp.complexity,
         "reasoning_effort":       traj.reasoning_effort,
         "transform_type":         traj.transform_type,
+        "trajectory_category":    traj.trajectory_category,
         "start_to_coin_distance":    gp.start_to_coin_distance,
         "coin_to_goal_distance":    gp.coin_to_goal_distance,
         "start_to_goal_via_coin_distance":   gp.start_to_goal_via_coin_distance,
         "start_to_goal_distance": gp.start_to_goal_distance,
         "coin_detour_distance":   gp.coin_detour_distance,
+        "coin_reachable_from_start": int(gp.coin_reachable_from_start),
+        "goal_reachable_from_start": int(gp.goal_reachable_from_start),
+        "goal_reachable_from_coin":  int(gp.goal_reachable_from_coin),
         "reached_goal":           int(traj.reached_goal),
         "coin_collected":         int(traj.coin_collected),
         "coin_collection_step":   traj.coin_collection_step if traj.coin_collection_step is not None else -1,
@@ -784,6 +899,7 @@ def compute_single_trajectory_row(
         "action_accuracy_phase1": acc1,
         "action_accuracy_phase2": acc2,
         **move,
+        "invalid_action_rate":    move["num_invalid_actions"] / L if L > 0 else 0.0,
     }
 
 
@@ -799,15 +915,18 @@ def compute_coin_grid_metrics(
     if not trajectories:
         return None, []
 
-    pattern = re.match(r"size(\d+)_comp([\d.]+)_grid(\d+)_([A-Za-z][A-Za-z0-9]*)_(\w+)", grid_key)
+    pattern = re.match(r"size(\d+)_comp([\d.]+)_grid(\d+)_", grid_key)
     if not pattern:
         return None, []
 
     grid_size = int(pattern.group(1))
     density = float(pattern.group(2))
     instance_id = int(pattern.group(3))
-    transform_type = pattern.group(4)
-    effort = pattern.group(5)
+    # Transform/effort come from the parsed filenames, not the grid_key regex —
+    # transforms like RandomStart_4_2 contain underscores the regex can't split.
+    transform_type = trajectories[0].transform_type
+    effort = trajectories[0].reasoning_effort
+    trajectory_category = trajectories[0].trajectory_category
 
     gp = trajectories[0].grid_params
     astar_coin = gp.start_to_coin_distance
@@ -857,10 +976,14 @@ def compute_coin_grid_metrics(
         "num_actions_up", "num_actions_down", "num_actions_left", "num_actions_right",
         "num_steps_front", "num_steps_left_turn", "num_steps_right_turn", "num_steps_back",
         "num_cell_revisits", "num_immediate_revisits", "num_coin_oscillations",
+        "num_invalid_actions",
     ]
     move_totals: dict[str, float] = {k: 0.0 for k in move_keys}
     for traj in trajectories:
-        for k, v in compute_trajectory_movement_stats(traj).items():
+        stats = compute_trajectory_movement_stats(
+            traj.steps, traj.grid_params.grid_layout, {traj.grid_params.coin_pos}
+        )
+        for k, v in stats.items():
             move_totals[k] += v
     move_means = {k: v / n for k, v in move_totals.items()}
 
@@ -903,11 +1026,15 @@ def compute_coin_grid_metrics(
         instance_id=instance_id,
         reasoning_effort=effort,
         transform_type=transform_type,
+        trajectory_category=trajectory_category,
         start_to_coin_distance=astar_coin,
         coin_to_goal_distance=astar_goal,
         start_to_goal_via_coin_distance=astar_total,
         start_to_goal_distance=start_to_goal,
         coin_detour_distance=coin_detour,
+        coin_reachable_from_start=int(gp.coin_reachable_from_start),
+        goal_reachable_from_start=int(gp.goal_reachable_from_start),
+        goal_reachable_from_coin=int(gp.goal_reachable_from_coin),
         num_trajectories=n,
         num_coin_collected=num_coin,
         num_goal_after_coin=num_full,
@@ -942,6 +1069,7 @@ def compute_coin_grid_metrics(
         mean_cell_revisits=move_means["num_cell_revisits"],
         mean_immediate_revisits=move_means["num_immediate_revisits"],
         mean_coin_oscillations=move_means["num_coin_oscillations"],
+        mean_invalid_actions=move_means["num_invalid_actions"],
     )
 
     return metrics, state_metrics
@@ -1013,8 +1141,14 @@ def process_model_coin_trajectories(
                 compute_two_phase_optimal_actions(grid_layout, coin_pos, goal_pos)
             )
 
-            # A* distance from coin to goal (start→coin loaded per trajectory below)
-            astar_goal_from_coin = dist_to_goal.get(coin_pos, 0)
+            # A* distance from coin to goal (start→coin loaded per trajectory below).
+            # -1 = unreachable (cell absent from the Dijkstra distance map).
+            astar_goal_from_coin = dist_to_goal.get(coin_pos, -1)
+            goal_reachable_from_coin = coin_pos in dist_to_goal
+
+            trajectory_category = infer_trajectory_category(
+                traj_files[0], parsed["transform_type"]
+            )
 
             # Grid-level distances computed once from the first trajectory's agent_start
             # (all trajectories for a grid share the same start position).
@@ -1032,13 +1166,23 @@ def process_model_coin_trajectories(
                     gp_raw = raw_data.get("grid_params", {})
                     start_coords = gp_raw.get("agent_start_coordinates", [0, 0])
                     agent_start = (int(start_coords[1]), int(start_coords[0]))
-                    astar_coin_dist = dist_to_coin.get(agent_start, 0)
+                    astar_coin_dist = dist_to_coin.get(agent_start, -1)
                 except Exception:
                     agent_start = (0, 0)
-                    astar_coin_dist = 0
+                    astar_coin_dist = -1
+
+                coin_reachable_from_start = agent_start in dist_to_coin
+                goal_reachable_from_start = agent_start in dist_to_goal
+                if not (coin_reachable_from_start and goal_reachable_from_start and goal_reachable_from_coin):
+                    print(
+                        f"  Warning: unreachable target in {grid_key} "
+                        f"(start={agent_start}, coin_reachable={coin_reachable_from_start}, "
+                        f"goal_reachable={goal_reachable_from_start}, "
+                        f"goal_from_coin={goal_reachable_from_coin})"
+                    )
 
                 if not _grid_distances_computed:
-                    _grid_start_to_goal = dist_to_goal.get(agent_start, 0)
+                    _grid_start_to_goal = dist_to_goal.get(agent_start, -1)
                     _grid_coin_detour = compute_coin_detour_distance(
                         grid_layout, agent_start, dist_to_coin, dist_to_goal
                     )
@@ -1052,6 +1196,11 @@ def process_model_coin_trajectories(
                     coin_to_goal_distance=astar_goal_from_coin,
                     start_to_goal_distance=_grid_start_to_goal,
                     coin_detour_distance=_grid_coin_detour,
+                    trajectory_category=trajectory_category,
+                    coin_reachable_from_start=coin_reachable_from_start,
+                    goal_reachable_from_start=goal_reachable_from_start,
+                    goal_reachable_from_coin=goal_reachable_from_coin,
+                    grid_layout=grid_layout,
                 )
                 if traj is not None:
                     trajectories.append(traj)
