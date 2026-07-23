@@ -204,6 +204,7 @@ def get_trajectory(
     seed: int = 42,
     reasoning_effort: Literal["low", "medium", "high"] = "low",
     model_name: str = "together_ai/openai/gpt-oss-20b",
+    tokenizer_name: str | None = None,
     observation_placeholders: list[str] = ["grid_state"],
     output_path: str = "get_trajectory_example_output.json",
     verbose: bool = False,
@@ -234,6 +235,10 @@ def get_trajectory(
         seed: Random seed for reproducibility.
         reasoning_effort: Reasoning effort level for the model ("low", "medium", or "high").
         model_name: Name of the model in format "provider/model_id".
+        tokenizer_name: HF repo id to load the tokenizer from. Defaults to the
+            provider-stripped model_name, which fails for Together fine-tuned
+            models that aren't published on HF Hub — pass the base model's
+            HF repo (e.g. "openai/gpt-oss-20b") in that case.
         observation_placeholders: List of placeholder names in the prompt template.
         output_path: Path to save the output JSON file.
         verbose: If True, print detailed logging during trajectory generation.
@@ -297,7 +302,9 @@ def get_trajectory(
         agent = LLMAgent(model_name, track_history=track_history)
     model_id = "/".join(model_name.split("/")[1:])
     provider = model_name.split("/")[0]
-    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_name or model_id
+    )
 
     traj = generate_trajectory(
         env=base_env,
@@ -1144,6 +1151,7 @@ def get_single_trajectory_coin_env(
     seed: int = 42,
     reasoning_effort: Literal["low", "medium", "high"] = "low",
     model_name: str = "together_ai/openai/gpt-oss-20b",
+    tokenizer_name: str | None = None,
     template_name: str = "grid_one_coin_control.j2",
     observation_placeholders: list[str] = ["grid_state"],
     output_path: str = "get_trajectory_deadend_example_output.json",
@@ -1175,6 +1183,10 @@ def get_single_trajectory_coin_env(
         seed: Random seed for reproducibility.
         reasoning_effort: Reasoning effort level for the model ("low", "medium", or "high").
         model_name: Name of the model in format "provider/model_id".
+        tokenizer_name: HF repo id to load the tokenizer from. Defaults to the
+            provider-stripped model_name, which fails for Together fine-tuned
+            models that aren't published on HF Hub — pass the base model's
+            HF repo (e.g. "openai/gpt-oss-20b") in that case.
         template_name: Name of the Jinja2 template file to use for prompts.
         observation_placeholders: List of placeholder names in the prompt template.
         output_path: Path to save the output JSON file.
@@ -1290,7 +1302,9 @@ def get_single_trajectory_coin_env(
     )
     model_id = "/".join(model_name.split("/")[1:])
     provider = model_name.split("/")[0]
-    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_name or model_id
+    )
 
     traj = generate_trajectory(
         env=base_env,
@@ -1452,6 +1466,7 @@ def get_multiple_trajectories_coin_env(
     seed: int = 42,
     reasoning_efforts: list[Literal["low", "medium", "high"]] = ["low"],
     model_names: list[str] = ["together_ai/openai/gpt-oss-20b"],
+    tokenizer_name: str | None = None,
     observation_placeholders: list[str] = ["grid_state"],
     output_dir: str = ".",
     verbose: bool = False,
@@ -1498,6 +1513,11 @@ def get_multiple_trajectories_coin_env(
         reasoning_efforts: List of reasoning effort levels to run on each grid. Each
             level produces num_trajectories_per_grid trajectories.
         model_names: List of model names in "provider/model_id" format.
+        tokenizer_name: HF repo id to load the tokenizer from, applied to every
+            model in model_names. Defaults to each model's provider-stripped
+            name, which fails for Together fine-tuned models that aren't
+            published on HF Hub — pass the base model's HF repo (e.g.
+            "openai/gpt-oss-20b") in that case.
         observation_placeholders: Placeholder names in the prompt template.
         output_dir: Directory to save output JSON files.
         verbose: If True, print detailed logging.
@@ -1780,6 +1800,7 @@ def get_multiple_trajectories_coin_env(
                     seed=traj_seed,
                     reasoning_effort=effort,
                     model_name=model_name,
+                    tokenizer_name=tokenizer_name,
                     observation_placeholders=observation_placeholders,
                     output_path=output_path,
                     verbose=verbose,
@@ -1932,6 +1953,7 @@ def get_single_trajectory_two_coin_env(
     seed: int = 42,
     reasoning_effort: Literal["low", "medium", "high"] = "low",
     model_name: str = "together_ai/openai/gpt-oss-20b",
+    tokenizer_name: str | None = None,
     template_name: str = "grid_two_coins_collect_one.j2",
     observation_placeholders: list[str] = ["grid_state"],
     output_path: str = "get_trajectory_two_coin_example_output.json",
@@ -1968,6 +1990,10 @@ def get_single_trajectory_two_coin_env(
         seed: Random seed for reproducibility.
         reasoning_effort: Reasoning effort level ("low", "medium", or "high").
         model_name: Model name in "provider/model_id" format.
+        tokenizer_name: HF repo id to load the tokenizer from. Defaults to the
+            provider-stripped model_name, which fails for Together fine-tuned
+            models that aren't published on HF Hub — pass the base model's
+            HF repo (e.g. "openai/gpt-oss-20b") in that case.
         template_name: Jinja2 template to use. Determines the agent's coin objective.
         observation_placeholders: Placeholder names in the prompt template.
         output_path: Path to save the output JSON file.
@@ -2080,7 +2106,9 @@ def get_single_trajectory_two_coin_env(
     )
     model_id = "/".join(model_name.split("/")[1:])
     provider = model_name.split("/")[0]
-    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_name or model_id
+    )
 
     traj = generate_trajectory(
         env=base_env,

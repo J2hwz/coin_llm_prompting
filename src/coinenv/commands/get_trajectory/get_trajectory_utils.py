@@ -249,7 +249,7 @@ def annotate_output_tokens(model_name: str, output_tokens):
     Raises:
         NotImplementedError: If the model is not supported for annotation.
     """
-    if "openai/gpt-oss-20b" in model_name:
+    if "gpt-oss-20b" in model_name:
         template_special_tokens = {
             "<|channel|>",
             "<|message|>",
