@@ -377,7 +377,9 @@ class LLMAgent(Agent, BaseLLMInterface):
         text_env = FullObservabilityTextWrapper(env)
         return text_env.observation(None)
 
-    def _generate_action_query_prompt(self, env: MiniGridEnv) -> str:
+    def _generate_action_query_prompt(
+        self, env: MiniGridEnv, step_budget: int | None = None
+    ) -> str:
         """Generate a prompt for the LLM to select an action."""
         # Get text observation using existing wrapper
         obs_text = self._get_text_observation(env)
@@ -392,6 +394,7 @@ class LLMAgent(Agent, BaseLLMInterface):
             grid_state=obs_text,
             carrying_key=carrying_key,
             history=self.history,
+            step_budget=step_budget,
         )
         return prompt
 

@@ -384,7 +384,9 @@ def generate_trajectory(
         # Capture pre-step position for history (before prompt generation)
         pre_step_pos = tuple(int(x) for x in unwrapped_env.agent_pos)
 
-        prompt = agent._generate_action_query_prompt(unwrapped_env)
+        prompt = agent._generate_action_query_prompt(
+            unwrapped_env, step_budget=max_steps_per_trajectory
+        )
         if verbose:
             logger.info(f"Step {step_count}")
             logger.info(agent._get_text_observation(env))
