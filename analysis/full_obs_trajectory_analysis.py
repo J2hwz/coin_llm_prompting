@@ -388,14 +388,19 @@ def load_grid_layout(grid_file: Path) -> Optional[list[list[str]]]:
 # =============================================================================
 
 
-def compute_empirical_uncertainty_metrics(
+def collect_uncertainty_values(
     state_action_counts: StateActionCounts,
     optimal_actions: dict[tuple[int, int], OptimalActionSet],
-) -> tuple[float, float, float]:
-    """Compute mean entropy, optimal entropy, and JSD using empirical distributions.
+) -> tuple[list[float], list[float], list[float]]:
+    """Per-visited-state entropy / optimal-entropy / JSD values, unaveraged.
 
-    Returns:
-        (mean_entropy, mean_optimal_entropy, mean_jsd)
+    `entropies` has one entry per visited state; `optimal_entropies` and
+    `jsds` only include states with a non-empty optimal action set. Exposed
+    (not prefixed) so callers that need to pool raw values across multiple
+    state_action_counts/optimal_actions pairs — e.g. combining several phases
+    correctly, each scored against its own target — can do so before
+    averaging, rather than averaging each pool separately and losing the
+    ability to recombine them into one properly-weighted mean.
     """
     entropies = []
     optimal_entropies = []
@@ -423,6 +428,22 @@ def compute_empirical_uncertainty_metrics(
             if jsd is not None:
                 jsds.append(jsd)
 
+    return entropies, optimal_entropies, jsds
+
+
+def compute_empirical_uncertainty_metrics(
+    state_action_counts: StateActionCounts,
+    optimal_actions: dict[tuple[int, int], OptimalActionSet],
+) -> tuple[float, float, float]:
+    """Compute mean entropy, optimal entropy, and JSD using empirical distributions.
+
+    Returns:
+        (mean_entropy, mean_optimal_entropy, mean_jsd)
+    """
+    entropies, optimal_entropies, jsds = collect_uncertainty_values(
+        state_action_counts, optimal_actions
+    )
+
     mean_entropy = sum(entropies) / len(entropies) if entropies else 0.0
     mean_optimal_entropy = (
         sum(optimal_entropies) / len(optimal_entropies) if optimal_entropies else 0.0
@@ -432,17 +453,16 @@ def compute_empirical_uncertainty_metrics(
     return mean_entropy, mean_optimal_entropy, mean_jsd
 
 
-def compute_ece(
+def collect_ece_values(
     state_action_counts: StateActionCounts,
     optimal_actions: dict[tuple[int, int], OptimalActionSet],
-    n_bins: int = 10,
-) -> float:
-    """Compute Expected Calibration Error.
+) -> tuple[list[float], list[float]]:
+    """Per-visited-state (confidence, accuracy) pairs, unbinned.
 
-    ECE = Σ (|B_m|/n) * |acc(B_m) - conf(B_m)|
-
-    For each state, confidence = max probability in empirical distribution,
-    accuracy = 1 if most likely action is optimal, 0 otherwise.
+    confidence = max probability in the empirical distribution at that state;
+    accuracy = 1 if the most likely action is optimal, 0 otherwise. Exposed
+    (not prefixed) so callers can pool raw pairs across multiple pools —
+    e.g. multiple phases, each scored against its own target — before binning.
     """
     confidences = []
     accuracies = []
@@ -467,6 +487,18 @@ def compute_ece(
         confidences.append(max_prob)
         accuracies.append(is_correct)
 
+    return confidences, accuracies
+
+
+def bin_and_score_ece(
+    confidences: list[float],
+    accuracies: list[float],
+    n_bins: int = 10,
+) -> float:
+    """Bin (confidence, accuracy) pairs into n_bins confidence buckets.
+
+    ECE = Σ (|B_m|/n) * |acc(B_m) - conf(B_m)|
+    """
     if not confidences:
         return 0.0
 
@@ -489,6 +521,22 @@ def compute_ece(
             ece += prop_in_bin * abs(avg_accuracy - avg_confidence)
 
     return float(ece)
+
+
+def compute_ece(
+    state_action_counts: StateActionCounts,
+    optimal_actions: dict[tuple[int, int], OptimalActionSet],
+    n_bins: int = 10,
+) -> float:
+    """Compute Expected Calibration Error.
+
+    ECE = Σ (|B_m|/n) * |acc(B_m) - conf(B_m)|
+
+    For each state, confidence = max probability in empirical distribution,
+    accuracy = 1 if most likely action is optimal, 0 otherwise.
+    """
+    confidences, accuracies = collect_ece_values(state_action_counts, optimal_actions)
+    return bin_and_score_ece(confidences, accuracies, n_bins)
 
 
 def compute_grid_metrics(

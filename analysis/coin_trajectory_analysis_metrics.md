@@ -51,8 +51,8 @@ Results are written to `{output-dir}/{model_name}/`:
 
 | File | Description |
 |---|---|
-| `coin_trajectory_metrics_<model>.csv` | Grid-level metrics (one row per grid × effort group) |
-| `coin_per_trajectory_<model>.csv` | Per-trajectory metrics |
+| `coin_trajectory_metrics.csv` | Grid-level metrics (one row per grid × effort group) |
+| `coin_per_trajectory.csv` | Per-trajectory metrics |
 | `coin_summary_by_size_complexity.csv` | Metrics averaged by grid size and density |
 | `coin_summary_by_distance.csv` | State-level metrics binned by distance to goal |
 | `coin_overall_summary.json` | Top-level summary statistics |
@@ -157,13 +157,19 @@ This module produces three output tables per model:
 
 | File | Description |
 |---|---|
-| `coin_trajectory_metrics_<model>.csv` | One row per (grid × effort) group |
-| `coin_per_trajectory_<model>.csv` | One row per individual trajectory |
+| `coin_trajectory_metrics.csv` | One row per (grid × effort) group |
+| `coin_per_trajectory.csv` | One row per individual trajectory |
 | `coin_summary_by_distance.csv` | State-level metrics binned by distance to goal |
+
+For the exact equations behind every metric — grouped into (1) accuracy and
+success at the task, (2) action accuracy/optimality/capability, (3) uncertainty
+(action-distribution entropy/JSD/ECE), and (4) movement-pattern metrics
+(wall bumps, revisits, quadrant/corner dwelling) — see
+[`coin_metrics_formulas.md`](coin_metrics_formulas.md).
 
 ---
 
-## Grid-Level Metrics (`coin_trajectory_metrics_<model>.csv`)
+## Grid-Level Metrics (`coin_trajectory_metrics.csv`)
 
 ### Metadata / Grouping Keys
 
@@ -220,14 +226,19 @@ This module produces three output tables per model:
 
 | Column | Description |
 |---|---|
-| `mean_entropy` | Mean Shannon entropy (bits) of the empirical action distribution across all visited states, weighted by visit count; higher = more spread/uncertain choices |
+| `mean_entropy` | Mean Shannon entropy (bits) of the empirical action distribution across all visited states — an unweighted mean over distinct visited states (each visited state contributes one value, regardless of how many times it was visited, not weighted by visit count); higher = more spread/uncertain choices |
 | `mean_optimal_entropy` | Mean entropy of the *optimal* action distribution (log₂ of the number of equally-good optimal actions); reflects inherent ambiguity in the optimal policy at each state |
 | `mean_jsd` | Mean Jensen-Shannon Divergence between the empirical and optimal action distributions; 0 = perfectly matches optimal, 1 = maximally divergent |
-| `mean_entropy_phase1` | `mean_entropy` computed using only phase-1 state visits |
+| `mean_entropy_phase1` | `mean_entropy` computed using only phase-1 state visits (vs `opt_to_coin`) |
+| `mean_optimal_entropy_phase1` | `mean_optimal_entropy` computed using only phase-1 state visits |
 | `mean_jsd_phase1` | `mean_jsd` computed using only phase-1 state visits (vs `opt_to_coin`) |
-| `mean_entropy_phase2` | `mean_entropy` computed using only phase-2 state visits |
+| `mean_entropy_phase2` | `mean_entropy` computed using only phase-2 state visits (vs `opt_to_goal`) |
+| `mean_optimal_entropy_phase2` | `mean_optimal_entropy` computed using only phase-2 state visits |
 | `mean_jsd_phase2` | `mean_jsd` computed using only phase-2 state visits (vs `opt_to_goal`) |
 | `ece` | Expected Calibration Error across all steps: mean absolute difference between predicted confidence (empirical action frequency) and observed accuracy, binned and weighted by bin size |
+
+> **✅ Fixed — `mean_entropy`, `mean_optimal_entropy`, `mean_jsd`, and `ece` are now coin-structure-aware.**
+> These previously pooled every step from every trajectory (both phases) into one empirical distribution per state, then compared it against a single `combined_optimal` map that silently collapsed to `opt_to_goal` for every cell (since `opt_to_coin` and `opt_to_goal` both cover every reachable cell of the grid) — meaning phase-1 (coin-directed) steps were being scored against the goal-directed target. This is fixed: each phase's visited states are now scored against its own correct target first, and the resulting per-state values are pooled together (weighted by the number of distinct states visited in each phase), rather than merging raw action counts or optimal-target maps across phases. See [`coin_metrics_formulas.md`](coin_metrics_formulas.md) for the exact formula and code references.
 
 ### Movement Metrics (mean per trajectory)
 
@@ -257,9 +268,33 @@ This module produces three output tables per model:
 | `mean_immediate_revisits` | Mean steps returning to the cell occupied exactly two steps earlier (A→B→A double-backs, excluding blocked no-op moves) |
 | `mean_coin_oscillations` | Mean steps oscillating through the coin cell: either arriving at the coin cell (having been there before) or departing the coin cell to a previously-visited adjacent cell; counts post-collection oscillation |
 
+### Spatial / Corner-Dwelling Metrics
+
+Quantifies whether a trajectory concentrates its visits in a particular
+region of the grid — motivated by an empirical finding that trajectories
+tend to dwell heavily in specific interior corners unrelated to the start,
+goal, or coin cell. Computed per trajectory, then averaged across the
+trajectories on a grid (same convention as the Movement Metrics above);
+`preferred_quadrant`/`preferred_corner` are the argmax of the *mean*
+fractions, not a per-trajectory mode. See
+[`coin_metrics_formulas.md` §6](coin_metrics_formulas.md#54-spatial--corner-dwelling-metrics-preferred-quadrant--corner)
+for the exact formulas.
+
+| Column | Description |
+|---|---|
+| `mean_quadrant_fraction_ul`/`ur`/`dl`/`dr` | Mean fraction of steps spent in each grid quadrant (split at the interior midpoint) |
+| `preferred_quadrant` | Argmax of the four mean quadrant fractions above |
+| `mean_quadrant_entropy` | Mean (per-trajectory) Shannon entropy of the quadrant-occupancy distribution; 0 = entirely one quadrant, 2 bits = perfectly even across all four |
+| `mean_corner_fraction_ul`/`ur`/`dl`/`dr` | Mean fraction of steps spent within each interior corner's region (side length scaled to ~20-25% of the grid's interior span); these four do not sum to 1 |
+| `preferred_corner` | Argmax of the four mean corner fractions, or empty/NaN if no trajectory on this grid ever entered any corner region |
+| `mean_max_corner_dwell_run` | Mean (across trajectories) of each trajectory's longest run of *consecutive* steps spent inside any corner region — captures "got stuck for N steps in a row," distinct from scattered occupancy |
+| `worst_max_corner_dwell_run` | The single longest corner dwell run observed across all trajectories on this grid |
+| `mean_preferred_quadrant_contains_start`/`coin` | Fraction of trajectories whose own preferred quadrant contained the start/coin cell — confound check: distinguishes "wandered somewhere task-irrelevant" from "the region already required visiting" (no `_goal` version) |
+| `mean_preferred_corner_contains_start`/`goal`/`coin` | Same confound check for the preferred corner |
+
 ---
 
-## Per-Trajectory Metrics (`coin_per_trajectory_<model>.csv`)
+## Per-Trajectory Metrics (`coin_per_trajectory.csv`)
 
 ### Metadata / Grouping Keys
 
@@ -300,6 +335,28 @@ Same definitions as grid-level movement metrics but raw counts for the single tr
 `num_steps_front`, `num_steps_left_turn`, `num_steps_right_turn`, `num_steps_back`,
 `num_cell_revisits`, `num_immediate_revisits`, `num_coin_oscillations`
 
+### Spatial / Corner-Dwelling Metrics
+
+This trajectory's own raw values (not averaged — see the grid-level section
+above for the aggregation across trajectories). See
+[`coin_metrics_formulas.md` §6](coin_metrics_formulas.md#54-spatial--corner-dwelling-metrics-preferred-quadrant--corner)
+for the exact formulas.
+
+| Column | Description |
+|---|---|
+| `quadrant_count_ul`/`ur`/`dl`/`dr` | Number of this trajectory's steps landing in each grid quadrant. Steps on the exact middle row or middle column are excluded from all four (see `quadrant_count_midline`), so these four do not sum to the trajectory length |
+| `quadrant_count_midline` | Number of steps on the exact middle row or middle column — not attributed to any quadrant |
+| `quadrant_fraction_ul`/`ur`/`dl`/`dr` | Fraction of this trajectory's *classified* (non-midline) steps spent in each grid quadrant — these four sum to 1.0 |
+| `quadrant_fraction_midline` | Fraction of *all* of this trajectory's steps spent on the midline (out of the full trajectory, not the classified subset) |
+| `preferred_quadrant` | Argmax of this trajectory's own quadrant fractions |
+| `quadrant_entropy` | Shannon entropy of this trajectory's quadrant-occupancy distribution (over the four classified fractions) |
+| `corner_fraction_ul`/`ur`/`dl`/`dr` | Fraction of this trajectory's own steps spent within each interior corner's region |
+| `preferred_corner` | Argmax of this trajectory's own corner fractions, or empty/NaN if it never entered any corner region |
+| `max_corner_dwell_run` | This trajectory's longest run of consecutive steps spent inside any corner region |
+| `start_quadrant`/`terminal_quadrant`/`coin_quadrant` | Which quadrant (`ul`/`ur`/`dl`/`dr`) the start/terminal-goal/coin cell itself falls in, or `midline` if it sits exactly on the middle row/column. A fixed property of the grid, repeated per trajectory |
+| `preferred_quadrant_contains_start`/`coin` | 1 if this trajectory's preferred quadrant contains the start/coin cell, else 0 (no `_goal` version — redundant with `terminal_quadrant` above) |
+| `preferred_corner_contains_start`/`goal`/`coin` | Same confound check for the preferred corner (0 if `preferred_corner` is empty) |
+
 ---
 
 ## State-Level Distance Metrics (`coin_summary_by_distance.csv`)
@@ -314,4 +371,6 @@ Aggregated across all states binned by their A* distance to the goal.
 | `optimal_entropy` | Entropy of the optimal action distribution at this state |
 | `jsd` | Jensen-Shannon Divergence at this state |
 | `is_optimal` | 1 if the most-frequently-chosen action is in the optimal set |
-| `n_observations` | Total number of visits to this state across all trajectories |
+| `n_observations` | Total number of visits to this state, within this phase, across all trajectories |
+
+> **✅ Fixed — per-state `entropy`/`optimal_entropy`/`jsd`/`is_optimal` are now scored against the correct phase target.** Each visited state is now attributed to the phase (1 = toward coin, vs `opt_to_coin`; 2 = toward goal, vs `opt_to_goal`) it was actually visited in, before this CSV's underlying per-state rows are built — see [`coin_metrics_formulas.md`](coin_metrics_formulas.md) for the full formula. **Row-cardinality note:** a state visited during *both* phases now contributes two rows here instead of one previously-blended row, so `n_states`/row counts in `coin_summary_by_distance.csv` (produced by aggregating this data) count `(state, phase)` pairs rather than distinct states; `n_observations` sums per distance bucket are unaffected (same total visit counts, now correctly split by phase).

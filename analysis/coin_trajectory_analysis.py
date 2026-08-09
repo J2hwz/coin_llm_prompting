@@ -32,7 +32,9 @@ from analysis.analysis_utils import (
 from analysis.full_obs_trajectory_analysis import (
     StateActionCounts,
     batch_grid_keys,
-    compute_ece,
+    bin_and_score_ece,
+    collect_ece_values,
+    collect_uncertainty_values,
     compute_empirical_uncertainty_metrics,
     compute_summary_by_distance,
     discover_model_directories,
@@ -46,7 +48,7 @@ from analysis.visualization import (
 
 COIN_SYMBOL = "C"
 WALL_SYMBOL = "#"
-KNOWN_EFFORTS = {"low", "medium"}
+KNOWN_EFFORTS = {"low", "medium", "random"}
 
 _ACTION_DELTAS = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
 
@@ -181,8 +183,10 @@ class CoinGridTrajectoryMetrics:
     mean_optimal_entropy: float
     mean_jsd: float
     mean_entropy_phase1: float
+    mean_optimal_entropy_phase1: float
     mean_jsd_phase1: float
     mean_entropy_phase2: float
+    mean_optimal_entropy_phase2: float
     mean_jsd_phase2: float
     ece: float
 
@@ -206,6 +210,30 @@ class CoinGridTrajectoryMetrics:
     mean_immediate_revisits: float = 0.0   # steps returning to the immediately preceding cell
     mean_coin_oscillations: float = 0.0    # steps oscillating through the coin cell
     mean_invalid_actions: float = 0.0      # wall-bump actions (agent stays in the same cell)
+
+    # --- Spatial / corner-dwelling metrics ---
+    # Each computed per trajectory, then averaged (same convention as the
+    # movement metrics above) — never by pooling positions across
+    # trajectories first. preferred_quadrant/preferred_corner are the argmax
+    # of the mean fractions below, not a per-trajectory mode.
+    mean_quadrant_fraction_ul: float = 0.0
+    mean_quadrant_fraction_ur: float = 0.0
+    mean_quadrant_fraction_dl: float = 0.0
+    mean_quadrant_fraction_dr: float = 0.0
+    preferred_quadrant: str = ""
+    mean_quadrant_entropy: float = 0.0
+    mean_corner_fraction_ul: float = 0.0
+    mean_corner_fraction_ur: float = 0.0
+    mean_corner_fraction_dl: float = 0.0
+    mean_corner_fraction_dr: float = 0.0
+    preferred_corner: Optional[str] = None
+    mean_max_corner_dwell_run: float = 0.0
+    worst_max_corner_dwell_run: int = 0
+    mean_preferred_quadrant_contains_start: float = 0.0
+    mean_preferred_quadrant_contains_coin: float = 0.0
+    mean_preferred_corner_contains_start: float = 0.0
+    mean_preferred_corner_contains_goal: float = 0.0
+    mean_preferred_corner_contains_coin: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -241,8 +269,10 @@ class CoinGridTrajectoryMetrics:
             "mean_optimal_entropy": self.mean_optimal_entropy,
             "mean_jsd": self.mean_jsd,
             "mean_entropy_phase1": self.mean_entropy_phase1,
+            "mean_optimal_entropy_phase1": self.mean_optimal_entropy_phase1,
             "mean_jsd_phase1": self.mean_jsd_phase1,
             "mean_entropy_phase2": self.mean_entropy_phase2,
+            "mean_optimal_entropy_phase2": self.mean_optimal_entropy_phase2,
             "mean_jsd_phase2": self.mean_jsd_phase2,
             "ece": self.ece,
             "mean_step_accuracy": self.mean_step_accuracy,
@@ -259,6 +289,24 @@ class CoinGridTrajectoryMetrics:
             "mean_immediate_revisits": self.mean_immediate_revisits,
             "mean_coin_oscillations": self.mean_coin_oscillations,
             "mean_invalid_actions": self.mean_invalid_actions,
+            "mean_quadrant_fraction_ul": self.mean_quadrant_fraction_ul,
+            "mean_quadrant_fraction_ur": self.mean_quadrant_fraction_ur,
+            "mean_quadrant_fraction_dl": self.mean_quadrant_fraction_dl,
+            "mean_quadrant_fraction_dr": self.mean_quadrant_fraction_dr,
+            "preferred_quadrant": self.preferred_quadrant,
+            "mean_quadrant_entropy": self.mean_quadrant_entropy,
+            "mean_corner_fraction_ul": self.mean_corner_fraction_ul,
+            "mean_corner_fraction_ur": self.mean_corner_fraction_ur,
+            "mean_corner_fraction_dl": self.mean_corner_fraction_dl,
+            "mean_corner_fraction_dr": self.mean_corner_fraction_dr,
+            "preferred_corner": self.preferred_corner,
+            "mean_max_corner_dwell_run": self.mean_max_corner_dwell_run,
+            "worst_max_corner_dwell_run": self.worst_max_corner_dwell_run,
+            "mean_preferred_quadrant_contains_start": self.mean_preferred_quadrant_contains_start,
+            "mean_preferred_quadrant_contains_coin": self.mean_preferred_quadrant_contains_coin,
+            "mean_preferred_corner_contains_start": self.mean_preferred_corner_contains_start,
+            "mean_preferred_corner_contains_goal": self.mean_preferred_corner_contains_goal,
+            "mean_preferred_corner_contains_coin": self.mean_preferred_corner_contains_coin,
         }
 
 
@@ -735,6 +783,179 @@ def compute_trajectory_movement_stats(
     }
 
 
+# =============================================================================
+# Spatial / Corner-Dwelling Metrics
+# =============================================================================
+
+
+_QUADRANT_ORDER = ["ul", "ur", "dl", "dr"]
+
+
+def corner_radius(grid_size: int) -> int:
+    """Corner-region side length, scaled to ~20-25% of the interior span.
+
+    interior_size = grid_size - 2 (interior spans 1..grid_size-2). Targets
+    round(0.25 * interior_size), floored to >=1, capped at interior_size // 2
+    so the four corner boxes can never overlap — this guarantees at least
+    one empty cell between any two corners sharing an edge, so a single
+    action (a Manhattan step of 1) can never jump directly from one corner
+    region into another. Returns 0 for degenerate grids too small to fit
+    non-overlapping corners (interior_size < 2).
+    """
+    interior_size = grid_size - 2
+    if interior_size < 2:
+        return 0
+    r = max(1, round(0.25 * interior_size))
+    return min(r, interior_size // 2)
+
+
+def classify_quadrant(pos: tuple[int, int], grid_size: int) -> Optional[str]:
+    """ul/ur/dl/dr, split at the interior midpoint (grid_size-1)/2, or None
+    if pos falls exactly on the middle row or middle column.
+
+    mid is always an exact integer (interior_size is odd for every grid
+    size in this dataset), so there is a genuine middle row (y == mid) and
+    middle column (x == mid). Positions on either are excluded from all
+    four quadrants rather than tie-broken into one, since they aren't
+    unambiguously in any quadrant.
+    """
+    x, y = pos
+    mid = (grid_size - 1) / 2
+    if x == mid or y == mid:
+        return None
+    vertical = "u" if y < mid else "d"
+    horizontal = "l" if x < mid else "r"
+    return vertical + horizontal
+
+
+def classify_corner(pos: tuple[int, int], grid_size: int) -> Optional[str]:
+    """ul/ur/dl/dr if pos falls in that corner's corner_radius(grid_size)
+    box, else None."""
+    r = corner_radius(grid_size)
+    if r <= 0:
+        return None
+    x, y = pos
+    lo, hi = 1, grid_size - 2
+    near_top = y <= lo + r - 1
+    near_bottom = y >= hi - r + 1
+    near_left = x <= lo + r - 1
+    near_right = x >= hi - r + 1
+
+    if near_top and near_left:
+        return "ul"
+    if near_top and near_right:
+        return "ur"
+    if near_bottom and near_left:
+        return "dl"
+    if near_bottom and near_right:
+        return "dr"
+    return None
+
+
+def quadrant_matches_preferred(pos: tuple[int, int], grid_size: int, preferred_quadrant: str) -> bool:
+    """True if pos's quadrant equals preferred_quadrant.
+
+    preferred_quadrant is stored uppercase (e.g. "UL") while
+    classify_quadrant returns lowercase (e.g. "ul") — this does the
+    case-insensitive comparison correctly. A position on the midline
+    (classify_quadrant returns None) never matches."""
+    q = classify_quadrant(pos, grid_size)
+    return q is not None and q.upper() == preferred_quadrant
+
+
+def quadrant_label(pos: tuple[int, int], grid_size: int) -> str:
+    """Quadrant of pos as a lowercase label (ul/ur/dl/dr), or "midline" if
+    pos falls on the exact middle row or middle column (classify_quadrant
+    returns None for those)."""
+    q = classify_quadrant(pos, grid_size)
+    return q if q is not None else "midline"
+
+
+def compute_spatial_stats(
+    positions: list[tuple[int, int]],
+    grid_size: int,
+) -> dict[str, Any]:
+    """Quadrant/corner occupancy, preferred region, quadrant entropy, and
+    longest any-corner dwell run for ONE trajectory's own ordered position
+    list.
+
+    Positions on the exact middle row or middle column are excluded from
+    all four quadrants (classify_quadrant returns None for them) rather
+    than tie-broken into one — quadrant_count_ul/ur/dl/dr therefore do not
+    sum to len(positions); the gap is quadrant_count_midline.
+    quadrant_fraction_ul/ur/dl/dr are computed over classified (non-midline)
+    positions only, so they still sum to 1.0 and quadrant_entropy (which
+    assumes a proper distribution) stays valid; quadrant_fraction_midline
+    is computed over the full trajectory instead, since it isn't part of
+    that same partition.
+
+    Always call this per-trajectory — never on a pooled multi-trajectory
+    list. max_corner_dwell_run is order-dependent; concatenating separate
+    trajectories' positions would splice fake dwell runs across trajectory
+    boundaries. Grid-level statistics are obtained by averaging this
+    function's per-trajectory outputs, not by pooling positions first (see
+    compute_coin_grid_metrics).
+    """
+    n = len(positions)
+    quadrant_counts = {q: 0 for q in _QUADRANT_ORDER}
+    corner_counts = {q: 0 for q in _QUADRANT_ORDER}
+    midline_count = 0
+
+    max_dwell = 0
+    current_dwell = 0
+
+    for pos in positions:
+        quadrant = classify_quadrant(pos, grid_size)
+        if quadrant is None:
+            midline_count += 1
+        else:
+            quadrant_counts[quadrant] += 1
+        corner = classify_corner(pos, grid_size)
+        if corner is not None:
+            corner_counts[corner] += 1
+            current_dwell += 1
+            max_dwell = max(max_dwell, current_dwell)
+        else:
+            current_dwell = 0
+
+    n_classified = n - midline_count
+    quadrant_fractions = {
+        q: (quadrant_counts[q] / n_classified if n_classified > 0 else 0.0) for q in _QUADRANT_ORDER
+    }
+    corner_fractions = {
+        q: (corner_counts[q] / n if n > 0 else 0.0) for q in _QUADRANT_ORDER
+    }
+
+    preferred_quadrant = max(quadrant_fractions, key=quadrant_fractions.get).upper()
+    preferred_corner = (
+        max(corner_fractions, key=corner_fractions.get).upper()
+        if max(corner_fractions.values()) > 0
+        else None
+    )
+    quadrant_entropy = shannon_entropy({i: f for i, f in enumerate(quadrant_fractions.values())})
+
+    return {
+        "preferred_quadrant": preferred_quadrant,
+        "quadrant_entropy": quadrant_entropy,
+        "quadrant_count_ul": quadrant_counts["ul"],
+        "quadrant_count_ur": quadrant_counts["ur"],
+        "quadrant_count_dl": quadrant_counts["dl"],
+        "quadrant_count_dr": quadrant_counts["dr"],
+        "quadrant_count_midline": midline_count,
+        "quadrant_fraction_ul": quadrant_fractions["ul"],
+        "quadrant_fraction_ur": quadrant_fractions["ur"],
+        "quadrant_fraction_dl": quadrant_fractions["dl"],
+        "quadrant_fraction_dr": quadrant_fractions["dr"],
+        "quadrant_fraction_midline": (midline_count / n if n > 0 else 0.0),
+        "preferred_corner": preferred_corner,
+        "corner_fraction_ul": corner_fractions["ul"],
+        "corner_fraction_ur": corner_fractions["ur"],
+        "corner_fraction_dl": corner_fractions["dl"],
+        "corner_fraction_dr": corner_fractions["dr"],
+        "max_corner_dwell_run": max_dwell,
+    }
+
+
 def compute_phase_accuracy(
     trajectories: list[CoinLightweightTrajectory],
     opt_to_coin: dict[tuple[int, int], OptimalActionSet],
@@ -776,15 +997,15 @@ def compute_phase_accuracy(
     return acc1, acc2, combined
 
 
-def compute_phase_uncertainty(
+def build_phase_pools(
     trajectories: list[CoinLightweightTrajectory],
-    opt_to_coin: dict[tuple[int, int], OptimalActionSet],
-    opt_to_goal: dict[tuple[int, int], OptimalActionSet],
-) -> tuple[float, float, float, float]:
-    """Compute mean JSD and entropy split by phase.
+) -> tuple[StateActionCounts, StateActionCounts]:
+    """Split every step into its phase-1 (pre-coin) / phase-2 (post-coin) pool.
+
+    Uses the same in_phase2 rule as get_step_optimal_actions/compute_phase_accuracy.
 
     Returns:
-        (mean_entropy_p1, mean_jsd_p1, mean_entropy_p2, mean_jsd_p2)
+        (counts_p1, counts_p2)
     """
     counts_p1: StateActionCounts = StateActionCounts()
     counts_p2: StateActionCounts = StateActionCounts()
@@ -800,9 +1021,73 @@ def compute_phase_uncertainty(
             else:
                 counts_p1.add(step.agent_position, step.agent_action)
 
-    ent1, _, jsd1 = compute_empirical_uncertainty_metrics(counts_p1, opt_to_coin)
-    ent2, _, jsd2 = compute_empirical_uncertainty_metrics(counts_p2, opt_to_goal)
-    return ent1, jsd1, ent2, jsd2
+    return counts_p1, counts_p2
+
+
+def compute_phase_uncertainty(
+    counts_p1: StateActionCounts,
+    opt_to_coin: dict[tuple[int, int], OptimalActionSet],
+    counts_p2: StateActionCounts,
+    opt_to_goal: dict[tuple[int, int], OptimalActionSet],
+) -> tuple[float, float, float, float, float, float]:
+    """Compute mean entropy, optimal entropy, and JSD split by phase.
+
+    Returns:
+        (mean_entropy_p1, mean_optimal_entropy_p1, mean_jsd_p1,
+         mean_entropy_p2, mean_optimal_entropy_p2, mean_jsd_p2)
+    """
+    ent1, opt_ent1, jsd1 = compute_empirical_uncertainty_metrics(counts_p1, opt_to_coin)
+    ent2, opt_ent2, jsd2 = compute_empirical_uncertainty_metrics(counts_p2, opt_to_goal)
+    return ent1, opt_ent1, jsd1, ent2, opt_ent2, jsd2
+
+
+def compute_phase_aware_combined_uncertainty(
+    counts_p1: StateActionCounts,
+    opt_to_coin: dict[tuple[int, int], OptimalActionSet],
+    counts_p2: StateActionCounts,
+    opt_to_goal: dict[tuple[int, int], OptimalActionSet],
+) -> tuple[float, float, float]:
+    """Phase-correct combined entropy / optimal-entropy / JSD.
+
+    Each phase's visited states are scored against its OWN optimal target,
+    and only the resulting per-state VALUES are concatenated and averaged —
+    never raw action counts (would blend phase-1/phase-2 choices at shared
+    cells) and never the optimal-target dicts (would collapse to
+    opt_to_goal, since both cover every reachable cell). Equivalent to
+    weighting mean_entropy_phase1/phase2 by the number of distinct states
+    visited in each phase.
+
+    Returns:
+        (mean_entropy, mean_optimal_entropy, mean_jsd)
+    """
+    ent1, opt_ent1, jsd1 = collect_uncertainty_values(counts_p1, opt_to_coin)
+    ent2, opt_ent2, jsd2 = collect_uncertainty_values(counts_p2, opt_to_goal)
+
+    entropies = ent1 + ent2
+    optimal_entropies = opt_ent1 + opt_ent2
+    jsds = jsd1 + jsd2
+
+    mean_entropy = sum(entropies) / len(entropies) if entropies else 0.0
+    mean_optimal_entropy = (
+        sum(optimal_entropies) / len(optimal_entropies) if optimal_entropies else 0.0
+    )
+    mean_jsd = sum(jsds) / len(jsds) if jsds else 0.0
+
+    return mean_entropy, mean_optimal_entropy, mean_jsd
+
+
+def compute_phase_aware_combined_ece(
+    counts_p1: StateActionCounts,
+    opt_to_coin: dict[tuple[int, int], OptimalActionSet],
+    counts_p2: StateActionCounts,
+    opt_to_goal: dict[tuple[int, int], OptimalActionSet],
+    n_bins: int = 10,
+) -> float:
+    """Phase-correct combined ECE — see compute_phase_aware_combined_uncertainty
+    for why pooling happens at the (confidence, accuracy) value level."""
+    conf1, acc1 = collect_ece_values(counts_p1, opt_to_coin)
+    conf2, acc2 = collect_ece_values(counts_p2, opt_to_goal)
+    return bin_and_score_ece(conf1 + conf2, acc1 + acc2, n_bins)
 
 
 def compute_coin_spl(
@@ -873,6 +1158,10 @@ def compute_single_trajectory_row(
         traj.steps, traj.grid_params.grid_layout, {traj.grid_params.coin_pos}
     )
 
+    positions = [step.agent_position for step in traj.steps]
+    spatial = compute_spatial_stats(positions, gp.grid_size)
+    preferred_corner_flag = spatial["preferred_corner"] is not None
+
     return {
         "trajectory_id":          traj.trajectory_id,
         "grid_id":                gp.grid_id,
@@ -900,6 +1189,32 @@ def compute_single_trajectory_row(
         "action_accuracy_phase2": acc2,
         **move,
         "invalid_action_rate":    move["num_invalid_actions"] / L if L > 0 else 0.0,
+        "preferred_quadrant":     spatial["preferred_quadrant"],
+        "quadrant_entropy":       spatial["quadrant_entropy"],
+        "quadrant_count_ul":      spatial["quadrant_count_ul"],
+        "quadrant_count_ur":      spatial["quadrant_count_ur"],
+        "quadrant_count_dl":      spatial["quadrant_count_dl"],
+        "quadrant_count_dr":      spatial["quadrant_count_dr"],
+        "quadrant_count_midline": spatial["quadrant_count_midline"],
+        "quadrant_fraction_ul":   spatial["quadrant_fraction_ul"],
+        "quadrant_fraction_ur":   spatial["quadrant_fraction_ur"],
+        "quadrant_fraction_dl":   spatial["quadrant_fraction_dl"],
+        "quadrant_fraction_dr":   spatial["quadrant_fraction_dr"],
+        "quadrant_fraction_midline": spatial["quadrant_fraction_midline"],
+        "preferred_corner":       spatial["preferred_corner"],
+        "corner_fraction_ul":     spatial["corner_fraction_ul"],
+        "corner_fraction_ur":     spatial["corner_fraction_ur"],
+        "corner_fraction_dl":     spatial["corner_fraction_dl"],
+        "corner_fraction_dr":     spatial["corner_fraction_dr"],
+        "max_corner_dwell_run":   spatial["max_corner_dwell_run"],
+        "start_quadrant":         quadrant_label(gp.agent_start, gp.grid_size),
+        "terminal_quadrant":      quadrant_label(gp.goal, gp.grid_size),
+        "coin_quadrant":          quadrant_label(gp.coin_pos, gp.grid_size),
+        "preferred_quadrant_contains_start": int(quadrant_matches_preferred(gp.agent_start, gp.grid_size, spatial["preferred_quadrant"])),
+        "preferred_quadrant_contains_coin":  int(quadrant_matches_preferred(gp.coin_pos, gp.grid_size, spatial["preferred_quadrant"])),
+        "preferred_corner_contains_start":   int(preferred_corner_flag and classify_corner(gp.agent_start, gp.grid_size) == spatial["preferred_corner"]),
+        "preferred_corner_contains_goal":    int(preferred_corner_flag and classify_corner(gp.goal, gp.grid_size) == spatial["preferred_corner"]),
+        "preferred_corner_contains_coin":    int(preferred_corner_flag and classify_corner(gp.coin_pos, gp.grid_size) == spatial["preferred_corner"]),
     }
 
 
@@ -946,30 +1261,36 @@ def compute_coin_grid_metrics(
     acc1, acc2, acc_combined = compute_phase_accuracy(trajectories, opt_to_coin, opt_to_goal)
     spl = compute_coin_spl(trajectories, astar_total)
 
-    # Aggregate state-action counts (all steps combined for ECE / overall metrics)
-    all_counts: StateActionCounts = StateActionCounts()
+    # Per-step accuracy — each step is scored against its own phase's optimal
+    # set via get_step_optimal_actions, so this is already phase-correct.
     total_steps = 0
     total_correct = 0
 
     for traj in trajectories:
         for step in traj.steps:
-            all_counts.add(step.agent_position, step.agent_action)
             total_steps += 1
             optimal_set = get_step_optimal_actions(step, traj, opt_to_coin, opt_to_goal)
             action_id = ACTION_NAME_TO_ID.get(step.agent_action.upper())
             if action_id is not None and action_id in optimal_set:
                 total_correct += 1
 
-    # Build combined optimal_actions map for ECE (phase 1 entries, phase 2 overwrite)
-    combined_optimal: dict[tuple[int, int], OptimalActionSet] = {}
-    combined_optimal.update(opt_to_coin)
-    combined_optimal.update(opt_to_goal)
-
-    mean_ent, mean_opt_ent, mean_jsd = compute_empirical_uncertainty_metrics(all_counts, combined_optimal)
-    ece = compute_ece(all_counts, combined_optimal)
-    ent1, jsd1, ent2, jsd2 = compute_phase_uncertainty(trajectories, opt_to_coin, opt_to_goal)
-
     mean_step_accuracy = total_correct / total_steps if total_steps > 0 else 0.0
+
+    # Phase-split pools feed both the phase-specific and the phase-aware
+    # combined uncertainty/ECE computations below. Pooling happens at the
+    # level of already-correctly-scored per-state values (never by merging
+    # raw action counts across phases, and never by merging opt_to_coin/
+    # opt_to_goal into one dict — the latter collapses to opt_to_goal
+    # entirely, since both cover every reachable cell of the grid).
+    counts_p1, counts_p2 = build_phase_pools(trajectories)
+
+    mean_ent, mean_opt_ent, mean_jsd = compute_phase_aware_combined_uncertainty(
+        counts_p1, opt_to_coin, counts_p2, opt_to_goal
+    )
+    ece = compute_phase_aware_combined_ece(counts_p1, opt_to_coin, counts_p2, opt_to_goal)
+    ent1, opt_ent1, jsd1, ent2, opt_ent2, jsd2 = compute_phase_uncertainty(
+        counts_p1, opt_to_coin, counts_p2, opt_to_goal
+    )
 
     # Movement stats — averaged across trajectories
     move_keys = [
@@ -987,37 +1308,108 @@ def compute_coin_grid_metrics(
             move_totals[k] += v
     move_means = {k: v / n for k, v in move_totals.items()}
 
-    # Per-state metrics for distance analysis (use dist_to_goal as reference distance)
+    # Spatial / corner-dwelling stats. Computed per trajectory, then averaged
+    # — never by pooling positions across trajectories first (max_corner_dwell_run
+    # is order-dependent; pooling would splice fake runs across trajectory
+    # boundaries), so every one of these is aggregated the same way movement
+    # stats already are (move_totals/move_means above), for consistency.
+    quadrant_fraction_totals = {q: 0.0 for q in _QUADRANT_ORDER}
+    corner_fraction_totals = {q: 0.0 for q in _QUADRANT_ORDER}
+    quadrant_entropy_total = 0.0
+    dwell_runs: list[int] = []
+    confound_totals = {
+        "preferred_quadrant_contains_start": 0,
+        "preferred_quadrant_contains_coin": 0,
+        "preferred_corner_contains_start": 0,
+        "preferred_corner_contains_goal": 0,
+        "preferred_corner_contains_coin": 0,
+    }
+
+    for traj in trajectories:
+        spatial = compute_spatial_stats(
+            [s.agent_position for s in traj.steps], traj.grid_params.grid_size
+        )
+        for q in _QUADRANT_ORDER:
+            quadrant_fraction_totals[q] += spatial[f"quadrant_fraction_{q}"]
+            corner_fraction_totals[q] += spatial[f"corner_fraction_{q}"]
+        quadrant_entropy_total += spatial["quadrant_entropy"]
+        dwell_runs.append(spatial["max_corner_dwell_run"])
+
+        t_gp = traj.grid_params
+        preferred_corner_flag = spatial["preferred_corner"] is not None
+        confound_totals["preferred_quadrant_contains_start"] += int(
+            quadrant_matches_preferred(t_gp.agent_start, t_gp.grid_size, spatial["preferred_quadrant"])
+        )
+        confound_totals["preferred_quadrant_contains_coin"] += int(
+            quadrant_matches_preferred(t_gp.coin_pos, t_gp.grid_size, spatial["preferred_quadrant"])
+        )
+        confound_totals["preferred_corner_contains_start"] += int(
+            preferred_corner_flag and classify_corner(t_gp.agent_start, t_gp.grid_size) == spatial["preferred_corner"]
+        )
+        confound_totals["preferred_corner_contains_goal"] += int(
+            preferred_corner_flag and classify_corner(t_gp.goal, t_gp.grid_size) == spatial["preferred_corner"]
+        )
+        confound_totals["preferred_corner_contains_coin"] += int(
+            preferred_corner_flag and classify_corner(t_gp.coin_pos, t_gp.grid_size) == spatial["preferred_corner"]
+        )
+
+    mean_quadrant_fraction = {q: v / n for q, v in quadrant_fraction_totals.items()}
+    mean_corner_fraction = {q: v / n for q, v in corner_fraction_totals.items()}
+    mean_quadrant_entropy = quadrant_entropy_total / n
+    mean_max_corner_dwell_run = sum(dwell_runs) / n
+    worst_max_corner_dwell_run = max(dwell_runs) if dwell_runs else 0
+    mean_confound = {k: v / n for k, v in confound_totals.items()}
+
+    # Grid-level preferred quadrant/corner = argmax of the mean fractions
+    # (equally weights each trajectory, rather than each raw step).
+    grid_preferred_quadrant = max(mean_quadrant_fraction, key=mean_quadrant_fraction.get).upper()
+    grid_preferred_corner = (
+        max(mean_corner_fraction, key=mean_corner_fraction.get).upper()
+        if max(mean_corner_fraction.values()) > 0
+        else None
+    )
+
+    # Per-state metrics for distance analysis (use dist_to_goal as reference
+    # distance for both phases — this file studies uncertainty vs. distance
+    # to the final goal specifically, regardless of phase). Each phase's
+    # pool is scored against its own optimal target; a cell visited in both
+    # phases correctly yields two rows (tagged by "phase") rather than one
+    # row blended across phases and scored against the wrong target.
     state_metrics: list[dict[str, Any]] = []
-    for pos, action_counts in all_counts.counts.items():
-        total = sum(action_counts.values())
-        if total == 0:
-            continue
+    for phase, counts, optimal_map in (
+        (1, counts_p1, opt_to_coin),
+        (2, counts_p2, opt_to_goal),
+    ):
+        for pos, action_counts in counts.counts.items():
+            total = sum(action_counts.values())
+            if total == 0:
+                continue
 
-        empirical_dist = all_counts.get_empirical_distribution(pos)
-        optimal_set = combined_optimal.get(pos, set())
-        distance = dist_to_goal.get(pos, -1)
+            empirical_dist = counts.get_empirical_distribution(pos)
+            optimal_set = optimal_map.get(pos, set())
+            distance = dist_to_goal.get(pos, -1)
 
-        if distance < 0:
-            continue
+            if distance < 0:
+                continue
 
-        entropy = shannon_entropy(empirical_dist)
-        opt_ent = optimal_entropy(len(optimal_set)) if optimal_set else 0.0
-        jsd = jensen_shannon_divergence(optimal_set, empirical_dist) if optimal_set else None
-        most_likely = max(empirical_dist, key=lambda a: empirical_dist[a])
-        is_optimal = 1 if most_likely in optimal_set else 0
+            entropy = shannon_entropy(empirical_dist)
+            opt_ent = optimal_entropy(len(optimal_set)) if optimal_set else 0.0
+            jsd = jensen_shannon_divergence(optimal_set, empirical_dist) if optimal_set else None
+            most_likely = max(empirical_dist, key=lambda a: empirical_dist[a])
+            is_optimal = 1 if most_likely in optimal_set else 0
 
-        state_metrics.append({
-            "grid_size": grid_size,
-            "density": density,
-            "reasoning_effort": effort,
-            "distance_to_goal": distance,
-            "entropy": entropy,
-            "optimal_entropy": opt_ent,
-            "jsd": jsd,
-            "is_optimal": is_optimal,
-            "n_observations": total,
-        })
+            state_metrics.append({
+                "grid_size": grid_size,
+                "density": density,
+                "reasoning_effort": effort,
+                "distance_to_goal": distance,
+                "phase": phase,
+                "entropy": entropy,
+                "optimal_entropy": opt_ent,
+                "jsd": jsd,
+                "is_optimal": is_optimal,
+                "n_observations": total,
+            })
 
     metrics = CoinGridTrajectoryMetrics(
         grid_id=grid_key,
@@ -1052,8 +1444,10 @@ def compute_coin_grid_metrics(
         mean_optimal_entropy=mean_opt_ent,
         mean_jsd=mean_jsd,
         mean_entropy_phase1=ent1,
+        mean_optimal_entropy_phase1=opt_ent1,
         mean_jsd_phase1=jsd1,
         mean_entropy_phase2=ent2,
+        mean_optimal_entropy_phase2=opt_ent2,
         mean_jsd_phase2=jsd2,
         ece=ece,
         mean_step_accuracy=mean_step_accuracy,
@@ -1070,6 +1464,24 @@ def compute_coin_grid_metrics(
         mean_immediate_revisits=move_means["num_immediate_revisits"],
         mean_coin_oscillations=move_means["num_coin_oscillations"],
         mean_invalid_actions=move_means["num_invalid_actions"],
+        mean_quadrant_fraction_ul=mean_quadrant_fraction["ul"],
+        mean_quadrant_fraction_ur=mean_quadrant_fraction["ur"],
+        mean_quadrant_fraction_dl=mean_quadrant_fraction["dl"],
+        mean_quadrant_fraction_dr=mean_quadrant_fraction["dr"],
+        preferred_quadrant=grid_preferred_quadrant,
+        mean_quadrant_entropy=mean_quadrant_entropy,
+        mean_corner_fraction_ul=mean_corner_fraction["ul"],
+        mean_corner_fraction_ur=mean_corner_fraction["ur"],
+        mean_corner_fraction_dl=mean_corner_fraction["dl"],
+        mean_corner_fraction_dr=mean_corner_fraction["dr"],
+        preferred_corner=grid_preferred_corner,
+        mean_max_corner_dwell_run=mean_max_corner_dwell_run,
+        worst_max_corner_dwell_run=worst_max_corner_dwell_run,
+        mean_preferred_quadrant_contains_start=mean_confound["preferred_quadrant_contains_start"],
+        mean_preferred_quadrant_contains_coin=mean_confound["preferred_quadrant_contains_coin"],
+        mean_preferred_corner_contains_start=mean_confound["preferred_corner_contains_start"],
+        mean_preferred_corner_contains_goal=mean_confound["preferred_corner_contains_goal"],
+        mean_preferred_corner_contains_coin=mean_confound["preferred_corner_contains_coin"],
     )
 
     return metrics, state_metrics
@@ -1276,6 +1688,8 @@ def _compute_coin_summary_by_size_density(df: pd.DataFrame) -> pd.DataFrame:
             mean_jsd=("mean_jsd", "mean"),
             mean_entropy_phase1=("mean_entropy_phase1", "mean"),
             mean_entropy_phase2=("mean_entropy_phase2", "mean"),
+            mean_optimal_entropy_phase1=("mean_optimal_entropy_phase1", "mean"),
+            mean_optimal_entropy_phase2=("mean_optimal_entropy_phase2", "mean"),
             mean_jsd_phase1=("mean_jsd_phase1", "mean"),
             mean_jsd_phase2=("mean_jsd_phase2", "mean"),
             mean_ece=("ece", "mean"),
@@ -1292,6 +1706,22 @@ def _compute_coin_summary_by_size_density(df: pd.DataFrame) -> pd.DataFrame:
             mean_cell_revisits=("mean_cell_revisits", "mean"),
             mean_immediate_revisits=("mean_immediate_revisits", "mean"),
             mean_coin_oscillations=("mean_coin_oscillations", "mean"),
+            mean_quadrant_fraction_ul=("mean_quadrant_fraction_ul", "mean"),
+            mean_quadrant_fraction_ur=("mean_quadrant_fraction_ur", "mean"),
+            mean_quadrant_fraction_dl=("mean_quadrant_fraction_dl", "mean"),
+            mean_quadrant_fraction_dr=("mean_quadrant_fraction_dr", "mean"),
+            mean_quadrant_entropy=("mean_quadrant_entropy", "mean"),
+            mean_corner_fraction_ul=("mean_corner_fraction_ul", "mean"),
+            mean_corner_fraction_ur=("mean_corner_fraction_ur", "mean"),
+            mean_corner_fraction_dl=("mean_corner_fraction_dl", "mean"),
+            mean_corner_fraction_dr=("mean_corner_fraction_dr", "mean"),
+            mean_max_corner_dwell_run=("mean_max_corner_dwell_run", "mean"),
+            worst_max_corner_dwell_run=("worst_max_corner_dwell_run", "mean"),
+            mean_preferred_quadrant_contains_start=("mean_preferred_quadrant_contains_start", "mean"),
+            mean_preferred_quadrant_contains_coin=("mean_preferred_quadrant_contains_coin", "mean"),
+            mean_preferred_corner_contains_start=("mean_preferred_corner_contains_start", "mean"),
+            mean_preferred_corner_contains_goal=("mean_preferred_corner_contains_goal", "mean"),
+            mean_preferred_corner_contains_coin=("mean_preferred_corner_contains_coin", "mean"),
         )
         .reset_index()
     )
@@ -1319,6 +1749,10 @@ def _compute_coin_overall_summary(df: pd.DataFrame) -> dict[str, Any]:
         "overall_mean_immediate_revisits": float(df["mean_immediate_revisits"].mean()),
         "overall_mean_coin_oscillations": float(df["mean_coin_oscillations"].mean()),
         "overall_mean_steps_back": float(df["mean_steps_back"].mean()),
+        "overall_mean_quadrant_entropy": float(df["mean_quadrant_entropy"].mean()),
+        "overall_mean_max_corner_dwell_run": float(df["mean_max_corner_dwell_run"].mean()),
+        "overall_mean_preferred_quadrant_contains_coin_rate": float(df["mean_preferred_quadrant_contains_coin"].mean()),
+        "overall_mean_preferred_corner_contains_coin_rate": float(df["mean_preferred_corner_contains_coin"].mean()),
     }
 
     if "reasoning_effort" in df.columns:
@@ -1467,13 +1901,13 @@ def save_coin_results(
 
     output_paths = {}
 
-    grid_path = model_dir / f"coin_trajectory_metrics_{results.model_name}.csv"
+    grid_path = model_dir / "coin_trajectory_metrics.csv"
     results.df.to_csv(grid_path, index=False)
     output_paths["grid_metrics"] = grid_path
     print(f"  Saved: {grid_path}")
 
     if not results.per_trajectory_df.empty:
-        traj_path = model_dir / f"coin_per_trajectory_{results.model_name}.csv"
+        traj_path = model_dir / "coin_per_trajectory.csv"
         results.per_trajectory_df.to_csv(traj_path, index=False)
         output_paths["per_trajectory"] = traj_path
         print(f"  Saved: {traj_path}")
@@ -1550,8 +1984,9 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="src/reveng/analysis/outputs/coin_trajectory_analysis",
-        help="Directory to save analysis outputs",
+        default="analysis/outputs",
+        help="Base directory to save analysis outputs — a per-model subfolder "
+             "(results.model_name) is created underneath it by save_coin_results",
     )
     parser.add_argument(
         "--batch-size",
