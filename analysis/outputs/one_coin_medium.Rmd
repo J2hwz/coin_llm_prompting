@@ -91,7 +91,7 @@ Subsetting data for this specific round of analyses
 ```{r}
 traj_df <- full_data %>% 
   filter(!trajectory_category %in% c("random_starts","reshuffled_walls"),
-         group == "control", model == "zero_shot", reasoning_effort == "medium") %>%
+         group %in% c("control","random"), model == "zero_shot", reasoning_effort %in% c("low","medium","random")) %>%
   mutate( # Ordering factors for mdl fitting 
     trajectory_category = fct_relevel(trajectory_category, "base"),
     grid_size = factor(grid_size,
@@ -105,7 +105,7 @@ traj_df <- full_data %>%
 
 grid_df <- full_data_grid %>%
   filter(!trajectory_category %in% c("random_starts","reshuffled_walls"),
-         group == "control", model == "zero_shot", reasoning_effort == "medium") %>%
+         group %in% c("control","random"), model == "zero_shot", reasoning_effort %in% c("low","medium","random")) %>%
   mutate( # Ordering factors for mdl fitting 
     trajectory_category = fct_relevel(trajectory_category, "base"),
     grid_size = factor(grid_size,
@@ -124,43 +124,22 @@ file_output <- "one_coin_medium"
 
 ```{r}
 grid_success_summary <- traj_df %>%
-  group_by(density, grid_size) %>%
+  group_by(grid_size, density, reasoning_effort) %>%
   summarise(
-    mean_goal = mean(goal_only),
-    se_goal = sd(goal_only)/sqrt(n()),
-    mean_coin = mean(coin_only),
-    se_coin = sd(coin_only)/sqrt(n()),
-    mean_both = mean(coin_and_goal),
-    se_both = sd(coin_and_goal)/sqrt(n())
-  ) %>%
-  pivot_longer(
-    cols = -c(density, grid_size),
-    names_to = c(".value", "metric"),
-    names_pattern = "(mean|se)_(.*)"
-  ) %>%
-  mutate(
-    metric = factor(metric, 
-                    levels = c("both", "coin", "goal"))
-    )
-
-grid_success_raw <- traj_df %>%
-  group_by(density, grid_size, grid_key) %>%
-  summarise(
-    mean_goal = mean(goal_only),
-    mean_coin = mean(coin_only),
-    mean_both = mean(coin_and_goal)
-  ) %>%
-  pivot_longer(
-    cols = -c(density, grid_size, grid_key),
-    names_to = c(".value", "metric"),
-    names_pattern = "(mean|se)_(.*)"
-  ) %>%
-  mutate(
-    metric = factor(metric, 
-                    levels = c("goal", "coin", "both"))
+    mean = mean(coin_and_goal),
+    se   = sd(coin_and_goal) / sqrt(n()),
+    .groups = "drop"
   )
 
-p1 <- ggplot(grid_success_summary, aes(x = metric, y = mean, fill = density)) +
+grid_success_raw <- traj_df %>%
+  group_by(grid_size, density, grid_key, reasoning_effort) %>%
+  summarise(
+    mean = mean(coin_and_goal),
+    .groups = "drop"
+  )
+
+p1 <- ggplot(grid_success_summary,
+             aes(x = factor(density), y = mean, fill = reasoning_effort)) +
   geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
            colour = "black", linewidth = 0.3) +
   geom_errorbar(
@@ -168,33 +147,31 @@ p1 <- ggplot(grid_success_summary, aes(x = metric, y = mean, fill = density)) +
     position = position_dodge(width = 0.8),
     width = 0.2
   ) +
-  geom_jitter(
+  geom_point(
     data = grid_success_raw,
-    aes(x = metric, y = mean, fill = density),
+    aes(x = factor(density), y = mean, fill = reasoning_effort),
     position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
     size = 0.8, alpha = 0.1, shape = 16, show.legend = FALSE
   ) +
-  facet_wrap(~grid_size) +
-  scale_x_discrete(
-    limits = c("both", "coin", "goal"),
-    labels = c(both = "Coin and terminal", coin = "Coin only",  goal = "Terminal only")
-  ) +
-  scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
-  labs(
-    # title = "Task Success by Grid Size and Density",
-    x = NULL,
-    y = "Task success",
-    fill = "Density"
-  ) +
+  facet_wrap(~ grid_size) +
+  scale_fill_manual(
+  values = c(low    = "#2c6fb0",
+             medium = "#7aa8d4",
+             random = "#b0b0b0"),
+  labels = c(low    = "Low reasoning",
+             medium = "Medium reasoning",
+             random = "Random actions")
+) +
+  labs(x = "Density", y = "Task success", fill = "Model") +
   theme_bw() +
   theme(
     legend.position = "right",
     panel.grid.major.x = element_blank(),
-    panel.grid.minor.x = element_blank(),
-    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    panel.grid.minor.x = element_blank()
   )
 
 p1
+
 ggsave(
   file.path("figures", file_output, "success_plot.png"),
   p1, width = 8, height = 4, dpi = 600
@@ -202,25 +179,115 @@ ggsave(
 ```
 
 ```{r}
-success_mdl1 <- glmer(
-  coin_and_goal ~ grid_size + density  + (1 | grid_key),
-  data = traj_df,
-  family = binomial(),
-  control=glmerControl(optimizer='bobyqa')
-)
+# Low and medium vs random 
+success_mdl1 <- traj_df %>%
+  mutate(reasoning_effort = relevel(factor(reasoning_effort), ref = "random")) %>%
+  glmer(
+    coin_and_goal ~ reasoning_effort + grid_size + density + (1 | grid_key),
+    data = .,
+    family = binomial(),
+    control = glmerControl(optimizer='bobyqa')
+  )
 
 summary(success_mdl1)
+
+exp(cbind(OR = fixef(success_mdl1),
+          confint(success_mdl1, method = "Wald", parm = "beta_")))
+```
+
+
+```{r}
+success_mdl2 <- traj_df %>%
+  filter(!reasoning_effort == "random") %>%
+  glmer(
+    coin_and_goal ~ reasoning_effort + grid_size + density + coin_detour_distance + start_to_goal_via_coin_distance + (1 | grid_key),
+    data = .,
+    family = binomial(),
+    control=glmerControl(optimizer='bobyqa')
+  )
+
+summary(success_mdl2)
+
+exp(cbind(OR = fixef(success_mdl2),
+          confint(success_mdl2, method = "Wald", parm = "beta_")))
 ```
 
 ```{r}
-success_mdl2 <- glmer(
-  coin_and_goal ~ grid_size + density + coin_detour_distance + start_to_goal_via_coin_distance + (1 | grid_key),
-  data = traj_df,
-  family = binomial(),
-  control=glmerControl(optimizer='bobyqa')
-)
+traj_df %>%
+  filter(reasoning_effort != "random", coin_and_goal == 1 | goal_only == 1) %>%
+  count(reasoning_effort, goal_only)
+```
 
-summary(success_mdl2)
+```{r}
+detour_skip <- traj_df %>%
+  filter(reasoning_effort != "random") %>%
+  filter(coin_and_goal == 1 | goal_only == 1) %>%
+  group_by(grid_key, grid_size, density, coin_detour_distance, reasoning_effort) %>%
+  summarise(
+    skipped = mean(goal_only),
+    n_trials = n(),
+    .groups = "drop"
+  )
+
+p1_1 <- ggplot(detour_skip,
+               aes(x = coin_detour_distance, y = skipped,
+                   colour = reasoning_effort, fill = reasoning_effort)) +
+  geom_point(
+    position = position_jitter(width = 0.2, height = 0.01),
+    size = 0.8, alpha = 0.25, shape = 16
+  ) +
+  # geom_smooth(method = "lm", se = TRUE, linewidth = 0.7, alpha = 0.2) +
+  geom_smooth(method = "glm", method.args = list(family = binomial),
+            aes(weight = n_trials), se = TRUE, linewidth = 0.7, alpha = 0.2) +
+  scale_colour_manual(
+    values = c(low    = "#2c6fb0",
+               medium = "#ea801c"),
+    labels = c(low    = "Low reasoning",
+               medium = "Medium reasoning")
+  ) +
+  scale_fill_manual(
+    values = c(low    = "#2c6fb0",
+               medium = "#ea801c"),
+    labels = c(low    = "Low reasoning",
+               medium = "Medium reasoning")
+  ) +
+  labs(
+    x = "Coin detour distance",
+    y = "Proportion reaching terminal without coin",
+    colour = "Model", fill = "Model"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.minor = element_blank()
+  )
+
+p1_1
+
+ggsave(
+  file.path("figures", file_output, "detour_plot.png"),
+  p1_1, width = 6, height = 4, dpi = 600
+)
+```
+
+
+```{r}
+# Goal only 
+success_mdl3 <- traj_df %>%
+  filter(!reasoning_effort == "random") %>%
+  filter(coin_and_goal == 1 | goal_only == 1) %>%
+  mutate(goal_only = as.integer(goal_only == 1)) %>%
+  glmer(
+    goal_only ~ reasoning_effort + grid_size + density + coin_detour_distance + start_to_goal_via_coin_distance + (1 | grid_key),
+    data = .,
+    family = binomial(),
+    control=glmerControl(optimizer='bobyqa')
+  )
+
+summary(success_mdl3)
+
+exp(cbind(OR = fixef(success_mdl3),
+          confint(success_mdl3, method = "Wald", parm = "beta_")))
 ```
 
 # Accuracy and uncertainty 
@@ -311,13 +378,144 @@ ggsave(
 ```
 
 ```{r}
+# --- 1. Task success at the grid level --------------------------------------
+success_raw <- traj_df %>%
+  group_by(grid_size, density, reasoning_effort, grid_key) %>%
+  summarise(value = mean(coin_and_goal), .groups = "drop") %>%
+  select(-grid_key) %>%
+  mutate(measure = "Task success")
+
+# --- 2. Grid-level metrics ---------------------------------------------------
+metrics_raw <- grid_df %>%
+  rename(
+    Accuracy = mean_action_accuracy,
+    Entropy  = mean_entropy,
+    JSD      = mean_jsd
+  ) %>%
+  select(grid_size, density, reasoning_effort, Accuracy, Entropy, JSD) %>%
+  pivot_longer(
+    cols = c(Accuracy, Entropy, JSD),
+    names_to = "measure",
+    values_to = "value"
+  )
+
+# --- 3. Bind and harmonise factors ------------------------------------------
+combined_raw <- bind_rows(success_raw, metrics_raw) %>%
+  mutate(
+    grid_size        = factor(grid_size),
+    density          = factor(density),
+    reasoning_effort = factor(reasoning_effort,
+                              levels = c("low", "medium", "random"),
+                              labels = c("Low", "Medium", "Random")),
+    measure          = factor(measure,
+                              levels = c("Task success", "Accuracy", "Entropy", "JSD"))
+  )
+
+combined_stats <- combined_raw %>%
+  group_by(grid_size, density, reasoning_effort, measure) %>%
+  summarise(
+    mean_val = mean(value, na.rm = TRUE),
+    se_val   = sd(value, na.rm = TRUE) / sqrt(sum(!is.na(value))),
+    .groups = "drop"
+  )
+
+# --- 4. Plot -----------------------------------------------------------------
+p2_1 <- ggplot(combined_stats,
+             aes(x = reasoning_effort, y = mean_val, fill = density)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean_val - se_val, ymax = mean_val + se_val),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_point(
+    data = combined_raw,
+    aes(x = reasoning_effort, y = value, fill = density),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.2, shape = 16, show.legend = FALSE
+  ) +
+  facet_grid(measure ~ grid_size, scales = "free_y") +
+  scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  labs(x = "Model", y = "Value", fill = "Density") +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+
+p2_1
+
+ggsave(
+  file.path("figures", file_output, "combined_metrics1.png"),
+  p2_1, width = 8, height = 9, dpi = 800
+)
+```
+
+```{r}
+p2_2 <- ggplot(combined_stats,
+             aes(x = density, y = mean_val, fill = reasoning_effort)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean_val - se_val, ymax = mean_val + se_val),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_point(
+    data = combined_raw,
+    aes(x = density, y = value, fill = reasoning_effort),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.1, shape = 16, show.legend = FALSE
+  ) +
+  facet_grid(measure ~ grid_size, scales = "free_y") +
+  scale_fill_manual(
+    values = c(Low    = "#2c6fb0",
+               Medium = "#7aa8d4",
+               Random = "#b0b0b0")
+  ) +
+  labs(x = "Density", y = "Value", fill = "Model") +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+
+p2_2
+
+ggsave(
+  file.path("figures", file_output, "combined_metrics2.png"),
+  p2_2, width = 8, height = 8, dpi = 600
+)
+```
+
+# Accuracy statistical tests
+
+```{r}
+acc_df <- traj_df %>%
+  mutate(reasoning_effort = relevel(factor(reasoning_effort), ref = "random"))
+
+
 accuracy_mdl1 <- lmer(
-  action_accuracy ~ grid_size + density  + coin_detour_distance + start_to_goal_via_coin_distance + (1 | grid_key),
-  data = traj_df,
+  action_accuracy ~ reasoning_effort + grid_size + density + (1 | grid_key),
+  data = acc_df,
   control= lmerControl(optimizer='bobyqa')
 )
+summary(accuracy_mdl1)
+model_parameters(accuracy_mdl1, ci_method = "kr")
+```
 
-model_parameters(accuracy_mdl1, ci_method="kr")
+
+```{r}
+accuracy_mdl2 <-lmer(
+    action_accuracy ~ reasoning_effort + grid_size + density  + coin_detour_distance + start_to_goal_via_coin_distance + (1 | grid_key),
+    data = filter(traj_df,reasoning_effort != "random"),
+    control= lmerControl(optimizer='bobyqa')
+  )
+
+model_parameters(accuracy_mdl2, ci_method="kr")
 ```
 
 ```{r}
@@ -668,7 +866,7 @@ quadrant_null <- glmer(count ~ offset(log(quadrant_sum))
             + (1 | grid_key),
             family = poisson, data = quadrant_long)
 
-quadrant_mdl1 <- glmer(count ~ density
+quadrant_mdl1 <- glmer(count ~ quadrant
             + offset(log(quadrant_sum))
             + (quadrant | traj_uid)
             + (1 | grid_key),
