@@ -62,7 +62,7 @@ _ALGO_DIR = Path(__file__).resolve().parent   # algorithms/
 if str(_ALGO_DIR) not in sys.path:
     sys.path.insert(0, str(_ALGO_DIR))
 
-from algorithms_util import to_mdp, to_json
+from algorithms_util import to_mdp, to_json, json_path_to_mdp_traj
 
 
 # ── Model parameters (Buidze et al., 2025, Table 1) ──────────────────────────
@@ -321,13 +321,8 @@ def path_to_surprise_traj(path, n_rows):
     """
     _dir_map = {(0, 1): 'N', (0, -1): 'S', (1, 0): 'E', (-1, 0): 'W'}
     traj = []
-    for i in range(len(path) - 1):
-        col, rt = path[i]
-        pos  = to_mdp(col, rt, n_rows)
-        dx   = path[i + 1][0] - path[i][0]
-        dy_t = path[i + 1][1] - path[i][1]
-        dy_m = -dy_t                           # flip: MDP y increases upward
-        act  = _dir_map.get((dx, dy_m))
+    for pos, delta in json_path_to_mdp_traj(path, n_rows, terminal_marker=False):
+        act = _dir_map.get(delta)
         if act is not None:                    # skip wall-bumps
             traj.append((pos, act))
     return traj

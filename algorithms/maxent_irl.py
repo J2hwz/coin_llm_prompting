@@ -39,8 +39,7 @@ if str(_ALGO_DIR) not in sys.path:
 
 from gridworld import GridMdpOld, construct_mdp_old
 from mdp_funcs import action_to_int
-from algorithms_util import to_mdp, to_json
-from inv_planning import build_gridmdp_old, json_path_to_mdp_traj
+from algorithms_util import to_mdp, to_json, build_gridmdp_old, json_path_to_mdp_traj
 
 
 # =============================================================================
