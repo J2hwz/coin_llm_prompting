@@ -39,3 +39,6 @@ packages = { find = { where = ["src"] } }
 
 [project.scripts]
 "coinenv-cli" = "coinenv.commands.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["algorithms/tests"]
