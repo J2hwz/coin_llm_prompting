@@ -49,10 +49,15 @@ def count_coins(grid_lines: list[str]) -> int:
     return total
 
 
-def format_history(entries: list) -> str:
+def format_history(entries: list, step_budget: int | None = None) -> str:
     if not entries:
         return ""
-    lines = ["History of previous moves:"]
+    if step_budget is not None:
+        remaining = step_budget - len(entries)
+        header = f"History of previous moves ({len(entries)} steps used, {remaining} remaining):"
+    else:
+        header = "History of previous moves:"
+    lines = [header]
     for pos, action, coins in entries:
         line = f"({pos[0]}, {pos[1]}): {action}"
         if coins is not None:
@@ -81,6 +86,20 @@ def main():
     template = traj["prompt"]["prompt_template"]
     prefix, suffix = template.split("{{grid_state}}")
 
+    # The saved prompt_template is a diagnostic render that never received
+    # step_budget, so the deceptive template's step-count sentence was saved
+    # with the number blank. Patch it back in using the budget actually
+    # enforced for this run, and use it to reconstruct the history header.
+    BLANK_STEP_BUDGET = "a maximum of  steps to complete the task"
+    step_budget = None
+    if BLANK_STEP_BUDGET in prefix:
+        step_budget = traj["model_params"].get("max_steps_per_trajectory")
+        if step_budget is not None:
+            prefix = prefix.replace(
+                BLANK_STEP_BUDGET,
+                f"a maximum of {step_budget} steps to complete the task",
+            )
+
     # Find the history insertion point: just before "# Inputs"
     MARKER = "\n# Inputs\n"
     if MARKER in prefix:
@@ -108,7 +127,7 @@ def main():
         grid_text = "\n".join(step["grid_state"])
 
         # Reconstruct full prompt: prefix + (optional history) + grid + suffix
-        history_block = format_history(history)
+        history_block = format_history(history, step_budget=step_budget)
         full_prompt = pre_history + "\n" + history_block + post_history + grid_text + suffix
 
         print(f"\n{'=' * 72}")
