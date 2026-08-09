@@ -42,6 +42,10 @@ _ALGO_DIR = Path(__file__).resolve().parent
 if str(_ALGO_DIR) not in sys.path:
     sys.path.insert(0, str(_ALGO_DIR))
 
+_ALGORITHMS_DIR = _ALGO_DIR.parent  # archived — shared modules live one level up
+if str(_ALGORITHMS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ALGORITHMS_DIR))
+
 from mdp_funcs import policy_iteration, q_value, value_function, policy_evaluation, expected_utility
 from gridworld import GridMdpOld, construct_mdp_old
 from algorithms_util import to_mdp, to_json

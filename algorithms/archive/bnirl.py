@@ -41,6 +41,10 @@ _ALGO_DIR = Path(__file__).resolve().parent
 if str(_ALGO_DIR) not in sys.path:
     sys.path.insert(0, str(_ALGO_DIR))
 
+_ALGORITHMS_DIR = _ALGO_DIR.parent  # archived — shared modules live one level up
+if str(_ALGORITHMS_DIR) not in sys.path:
+    sys.path.insert(0, str(_ALGORITHMS_DIR))
+
 from algorithms_util import to_mdp, to_json
 
 
