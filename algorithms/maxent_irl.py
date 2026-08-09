@@ -46,7 +46,10 @@ from algorithms_util import to_mdp, to_json, build_gridmdp_old, json_path_to_mdp
 # Core algorithm (from qzed/irl-maxent)
 # =============================================================================
 
-def expected_svf_from_policy(p_transition, p_initial, terminal, p_action, eps=1e-5):
+
+def expected_svf_from_policy(
+    p_transition, p_initial, terminal, p_action, eps=1e-5, max_iter=2000
+):
     """
     Compute the expected state visitation frequency using the given local
     action probabilities.
@@ -61,6 +64,9 @@ def expected_svf_from_policy(p_transition, p_initial, terminal, p_action, eps=1e
         terminal: list of terminal state integers.
         p_action: [state, action] -> local action probability.
         eps: convergence threshold.
+        max_iter: iteration cap — some (layout, single-trajectory) inputs
+            never drive delta below eps; without a cap this loop can run
+            indefinitely. Returns the best-so-far estimate if reached.
 
     Returns:
         Expected state visitation frequencies [state] -> svf.
@@ -75,7 +81,9 @@ def expected_svf_from_policy(p_transition, p_initial, terminal, p_action, eps=1e
     d = np.zeros(n_states)
 
     delta = np.inf
-    while delta > eps:
+    for _ in range(max_iter):
+        if delta <= eps:
+            break
         d_ = [p_transition[a].T.dot(p_action[:, a] * d) for a in range(n_actions)]
         d_ = p_initial + np.array(d_).sum(axis=0)
 
@@ -125,7 +133,9 @@ def softmax(x1, x2):
     return x_max + np.log(1.0 + np.exp(x_min - x_max))
 
 
-def local_causal_action_probabilities(p_transition, terminal, reward, discount, eps=1e-5):
+def local_causal_action_probabilities(
+    p_transition, terminal, reward, discount, eps=1e-5, max_iter=2000
+):
     """
     Compute local action probabilities for MaxCausalEntropy IRL.
     Algorithm 9.1 from Ziebart's thesis (2010) with discounting.
@@ -136,6 +146,8 @@ def local_causal_action_probabilities(p_transition, terminal, reward, discount, 
         reward: [state] -> reward.
         discount: discounting factor.
         eps: convergence threshold for state partition function.
+        max_iter: iteration cap — see expected_svf_from_policy's docstring;
+            same non-convergence risk applies here.
 
     Returns:
         [state, action] -> probability.
@@ -153,7 +165,9 @@ def local_causal_action_probabilities(p_transition, terminal, reward, discount, 
     v = -1e200 * np.ones(n_states)
 
     delta = np.inf
-    while delta > eps:
+    for _ in range(max_iter):
+        if delta <= eps:
+            break
         v_old = v
 
         q = np.array([reward + discount * p[a].dot(v_old) for a in range(n_actions)]).T
@@ -173,8 +187,12 @@ def compute_expected_causal_svf(
     p_transition, p_initial, terminal, reward, discount, eps_lap=1e-5, eps_svf=1e-5
 ):
     """Combine Algorithm 9.1 + 9.3 for MaxCausalEntropy IRL (Ziebart 2010)."""
-    p_action = local_causal_action_probabilities(p_transition, terminal, reward, discount, eps_lap)
-    return expected_svf_from_policy(p_transition, p_initial, terminal, p_action, eps_svf)
+    p_action = local_causal_action_probabilities(
+        p_transition, terminal, reward, discount, eps_lap
+    )
+    return expected_svf_from_policy(
+        p_transition, p_initial, terminal, p_action, eps_svf
+    )
 
 
 def feature_expectation_from_trajectories(features, trajectories):
@@ -197,8 +215,10 @@ def initial_probabilities_from_trajectories(n_states, trajectories):
 
 def linear_decay(lr0=0.2, decay_rate=1.0, decay_steps=1):
     """Linear learning-rate decay: lr(k) = lr0 / (1 + decay_rate * floor(k/decay_steps))."""
+
     def _lr(k):
         return lr0 / (1.0 + decay_rate * np.floor(k / decay_steps))
+
     return _lr
 
 
@@ -312,7 +332,17 @@ def transform_trajectory(mdp: GridMdpOld, traj: List[Tuple]):
     return Trajectory(transform)
 
 
-def irl(p_transition, features, terminal, trajectories, optim, init, eps=1e-4, eps_esvf=1e-5):
+def irl(
+    p_transition,
+    features,
+    terminal,
+    trajectories,
+    optim,
+    init,
+    eps=1e-4,
+    eps_esvf=1e-5,
+    max_iter=1000,
+):
     """
     Maximum Entropy IRL (Ziebart et al. 2008).
 
@@ -326,6 +356,10 @@ def irl(p_transition, features, terminal, trajectories, optim, init, eps=1e-4, e
         trajectories: list of Trajectory instances.
         optim: Optimizer instance.
         init: Initializer instance.
+        max_iter: iteration cap — some inputs (e.g. a single sparse
+            trajectory) never drive delta below eps; without a cap this
+            loop can run indefinitely. Returns the best-so-far reward if
+            reached, with a printed warning.
 
     Returns:
         Per-state reward array [n_states].
@@ -340,17 +374,29 @@ def irl(p_transition, features, terminal, trajectories, optim, init, eps=1e-4, e
     delta = np.inf
 
     optim.reset(theta)
-    while delta > eps:
+    converged = False
+    for _ in range(max_iter):
+        if delta <= eps:
+            converged = True
+            break
         theta_old = theta.copy()
 
         reward = features.dot(theta)
 
-        e_svf = compute_expected_svf(p_transition, p_initial, terminal, reward, eps_esvf)
+        e_svf = compute_expected_svf(
+            p_transition, p_initial, terminal, reward, eps_esvf
+        )
         grad = e_features - features.T.dot(e_svf)
 
         optim.step(grad)
 
         delta = np.max(np.abs(theta_old - theta))
+
+    if not converged:
+        print(
+            f"  WARNING: irl() did not converge within {max_iter} iterations "
+            f"(delta={delta:.2e} > eps={eps:.2e}) — using best-so-far reward"
+        )
 
     return features.dot(theta)
 
@@ -366,6 +412,7 @@ def irl_causal(
     eps=1e-4,
     eps_svf=1e-5,
     eps_lap=1e-5,
+    max_iter=1000,
 ):
     """
     Maximum Causal Entropy IRL (Ziebart 2010 thesis, Algorithm 9.1).
@@ -380,6 +427,10 @@ def irl_causal(
         optim: Optimizer instance.
         init: Initializer instance.
         discount: discount factor.
+        max_iter: iteration cap — some inputs (e.g. a single sparse
+            trajectory) never drive delta below eps; without a cap this
+            loop can run indefinitely. Returns the best-so-far reward if
+            reached, with a printed warning.
 
     Returns:
         Per-state reward array [n_states].
@@ -394,7 +445,11 @@ def irl_causal(
     delta = np.inf
 
     optim.reset(theta)
-    while delta > eps:
+    converged = False
+    for _ in range(max_iter):
+        if delta <= eps:
+            converged = True
+            break
         theta_old = theta.copy()
 
         reward = features.dot(theta)
@@ -408,12 +463,19 @@ def irl_causal(
         optim.step(grad)
         delta = np.max(np.abs(theta_old - theta))
 
+    if not converged:
+        print(
+            f"  WARNING: irl_causal() did not converge within {max_iter} iterations "
+            f"(delta={delta:.2e} > eps={eps:.2e}) — using best-so-far reward"
+        )
+
     return features.dot(theta)
 
 
 # =============================================================================
 # Public wrapper
 # =============================================================================
+
 
 def run_maxent(paths, layout, discount=0.99, eps=1e-4, eps_svf=1e-5):
     """
@@ -441,8 +503,11 @@ def run_maxent(paths, layout, discount=0.99, eps=1e-4, eps_svf=1e-5):
 
     mdp = build_gridmdp_old(layout)
 
-    trajs_mdp = [json_path_to_mdp_traj(p, n_rows, terminal_marker=True)
-                 for p in paths if len(p) >= 2]
+    trajs_mdp = [
+        json_path_to_mdp_traj(p, n_rows, terminal_marker=True)
+        for p in paths
+        if len(p) >= 2
+    ]
     trajs_mdp = [t for t in trajs_mdp if t]
     if not trajs_mdp:
         return np.full((n_rows, n_cols), np.nan), goal_j
@@ -472,8 +537,16 @@ def run_maxent(paths, layout, discount=0.99, eps=1e-4, eps_svf=1e-5):
     init = Constant(1.0)
 
     reward = irl_causal(
-        p_transition, features, terminals, traj_objects,
-        optim, init, discount, eps=eps, eps_svf=eps_svf, eps_lap=eps,
+        p_transition,
+        features,
+        terminals,
+        traj_objects,
+        optim,
+        init,
+        discount,
+        eps=eps,
+        eps_svf=eps_svf,
+        eps_lap=eps,
     )
 
     mdp_inferred = construct_mdp_old(mdp, reward)

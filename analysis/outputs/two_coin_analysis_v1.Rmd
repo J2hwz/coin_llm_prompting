@@ -1,0 +1,170 @@
+---
+title: "two_coin_analysis_v1"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+```
+
+
+# Two coins 
+
+```{r}
+collect_all_low <- read.csv("two_coin_collect_all/low/twocoin_per_trajectory_collect_all.csv")
+collect_all_medium <- read.csv("two_coin_collect_all/medium/twocoin_per_trajectory_collect_all.csv")
+collect_one_low <- read.csv("two_coin_collect_one/low/twocoin_per_trajectory_collect_one.csv")
+collect_one_medium <- read.csv("two_coin_collect_one/medium/twocoin_per_trajectory_collect_one.csv")
+
+
+full_data <- rbind(
+  collect_all_low, collect_all_medium,
+  collect_one_low, collect_one_medium
+  ) %>%
+  mutate(
+    collect_one_and_reach_goal = as.integer(ifelse(reached_goal == 1 & num_coins_collected == 1, 1, 0)),
+    collect_two_and_reach_goal = as.integer(ifelse(reached_goal == 1 & num_coins_collected == 2, 1, 0)),
+    collect_one_and_no_goal = as.integer(ifelse(reached_goal == 0 & num_coins_collected == 1, 1, 0)),
+    collect_two_and_no_goal = as.integer(ifelse(reached_goal == 0 & num_coins_collected == 2, 1, 0)),
+    goal_only = as.integer(ifelse(reached_goal == 1 & num_coins_collected == 0, 1, 0))
+  )
+
+rm(collect_all_low, collect_all_medium,
+  collect_one_low, collect_one_medium)
+```
+
+```{r}
+full_data %>%
+  group_by(collect_mode, reasoning_effort) %>%
+  summarise(
+    n = n(),
+    n_grids = n_distinct(grid_key)
+    )
+```
+
+```{r}
+summary <- full_data %>%
+  group_by(reasoning_effort, collect_mode) %>%
+  summarise(
+    mean_collect_one_and_reach_goal = mean(collect_one_and_reach_goal),
+    se_collect_one_and_reach_goal = sd(collect_one_and_reach_goal)/sqrt(n()),
+    mean_collect_two_and_reach_goal = mean(collect_two_and_reach_goal),
+    se_collect_two_and_reach_goal = sd(collect_two_and_reach_goal)/sqrt(n()),
+    mean_collect_one_and_no_goal = mean(collect_one_and_no_goal),
+    se_collect_one_and_no_goal = sd(collect_one_and_no_goal)/sqrt(n()),
+    mean_collect_two_and_no_goal = mean(collect_two_and_no_goal),
+    se_collect_two_and_no_goal = sd(collect_two_and_no_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(reasoning_effort, collect_mode),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+summary_by_grid <- full_data %>%
+  group_by(reasoning_effort, collect_mode, grid_key) %>%
+  summarise(
+    mean_collect_one_and_reach_goal = mean(collect_one_and_reach_goal),
+    se_collect_one_and_reach_goal = sd(collect_one_and_reach_goal)/sqrt(n()),
+    mean_collect_two_and_reach_goal = mean(collect_two_and_reach_goal),
+    se_collect_two_and_reach_goal = sd(collect_two_and_reach_goal)/sqrt(n()),
+    mean_collect_one_and_no_goal = mean(collect_one_and_no_goal),
+    se_collect_one_and_no_goal = sd(collect_one_and_no_goal)/sqrt(n()),
+    mean_collect_two_and_no_goal = mean(collect_two_and_no_goal),
+    se_collect_two_and_no_goal = sd(collect_two_and_no_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(reasoning_effort, collect_mode, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+p1 <- ggplot() +
+  geom_col(data = summary, aes(x = metric, y = mean, fill = metric)) + 
+  
+  geom_errorbar(data = summary, aes(x = metric, fill = metric, y = mean, ymin = mean - se, ymax = mean + se), width = 0.3,position = position_dodge(width = 0.9)) +
+  
+   geom_jitter(data = summary_by_grid, aes(x = metric, y = mean, fill = metric), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.2) +
+  
+  geom_col(position = "dodge") +
+  facet_grid(reasoning_effort ~ collect_mode, labeller = label_both) +
+  labs(x = NULL, y = "Task success", fill = "Isometric transformation") +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+p1
+
+ggsave("figures/two_coin_comparison.png", p1, width = 10, height = 6, dpi = 600)
+```
+
+
+
+
+
+```{r}
+summary <- full_data %>%
+  group_by(reasoning_effort, collect_mode, grid_size) %>%
+  summarise(
+    mean_collect_one_and_reach_goal = mean(collect_one_and_reach_goal),
+    se_collect_one_and_reach_goal = sd(collect_one_and_reach_goal)/sqrt(n()),
+    mean_collect_two_and_reach_goal = mean(collect_two_and_reach_goal),
+    se_collect_two_and_reach_goal = sd(collect_two_and_reach_goal)/sqrt(n()),
+    # mean_collect_one_and_no_goal = mean(collect_one_and_no_goal),
+    # se_collect_one_and_no_goal = sd(collect_one_and_no_goal)/sqrt(n()),
+    # mean_collect_two_and_no_goal = mean(collect_two_and_no_goal),
+    # se_collect_two_and_no_goal = sd(collect_two_and_no_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(reasoning_effort, collect_mode, grid_size),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+summary_by_grid <- full_data %>%
+  group_by(reasoning_effort, collect_mode, grid_key, grid_size) %>%
+  summarise(
+    mean_collect_one_and_reach_goal = mean(collect_one_and_reach_goal),
+    se_collect_one_and_reach_goal = sd(collect_one_and_reach_goal)/sqrt(n()),
+    mean_collect_two_and_reach_goal = mean(collect_two_and_reach_goal),
+    se_collect_two_and_reach_goal = sd(collect_two_and_reach_goal)/sqrt(n()),
+    # mean_collect_one_and_no_goal = mean(collect_one_and_no_goal),
+    # se_collect_one_and_no_goal = sd(collect_one_and_no_goal)/sqrt(n()),
+    # mean_collect_two_and_no_goal = mean(collect_two_and_no_goal),
+    # se_collect_two_and_no_goal = sd(collect_two_and_no_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(reasoning_effort, collect_mode, grid_key, grid_size),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+p2 <- ggplot() +
+  geom_col(data = summary, aes(x = metric, y = mean, fill = metric)) + 
+  
+  geom_errorbar(data = summary, aes(x = metric, fill = metric, y = mean, ymin = mean - se, ymax = mean + se), width = 0.3,position = position_dodge(width = 0.9)) +
+  
+   geom_jitter(data = summary_by_grid, aes(x = metric, y = mean, fill = metric), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.2) +
+  
+  geom_col(position = "dodge") +
+  facet_grid(reasoning_effort ~ collect_mode + grid_size, labeller = label_both) +
+  labs(x = NULL, y = "Task success", fill = "Isometric transformation") +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+p2
+
+ggsave("figures/two_coin_comparison_grids.png", p2, width = 10, height = 6, dpi = 600)
+```
+
+
+

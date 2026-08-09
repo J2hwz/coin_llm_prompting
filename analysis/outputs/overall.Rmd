@@ -1,0 +1,594 @@
+---
+title: "overall"
+output: html_document
+date: "2026-08-07"
+---
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(lme4)
+library(ggthemes)
+library(mclogit)
+library(nnet)
+library(parameters)
+library(DirichletReg) 
+```
+
+# Compiling datasets 
+
+Trajectory level
+
+```{r}
+loadData <- function(path, group, model) {
+  df <- read.csv(path)
+  df$group <- group # Keeping track of experimental condition 
+  df$model <- model # Keeping track of model zero-shot or fine-tuned 
+  df
+}
+
+control_low  <- loadData("control_low/coin_per_trajectory.csv", "control", "zero_shot") 
+control_medium    <- loadData("control_medium/coin_per_trajectory.csv", "control", "zero_shot")
+control_random   <- loadData("control_random/coin_per_trajectory.csv", "random", "zero_shot")
+control_deceptive   <- loadData("control_deceptive/coin_per_trajectory.csv", "deceptive", "zero_shot")
+
+avoid_low         <- loadData("avoid_low/coin_per_trajectory.csv", "avoid", "zero_shot")
+avoid_medium      <- loadData("avoid_medium/coin_per_trajectory.csv", "avoid", "zero_shot")
+
+ft_control_low    <- loadData("ft_control_low/coin_per_trajectory.csv", "control", "fine_tuned")
+ft_control_medium <- loadData("ft_control_medium/coin_per_trajectory.csv", "control", "fine_tuned")
+ft_avoid_low      <- loadData("ft_avoid_low/coin_per_trajectory.csv", "avoid", "fine_tuned")
+ft_avoid_medium   <- loadData("ft_avoid_medium/coin_per_trajectory.csv", "avoid", "fine_tuned")
+
+
+full_data <- rbind(
+  control_low, control_medium, control_random, control_deceptive,
+  avoid_low, avoid_medium,
+  ft_control_low, ft_control_medium, ft_avoid_low, ft_avoid_medium
+  ) %>%
+  mutate(
+    coin_and_goal = as.integer(reached_goal + coin_collected == 2),
+    goal_only = as.integer(ifelse(reached_goal == 1 & coin_collected == 0, 1, 0)),
+    coin_only = as.integer(ifelse(reached_goal == 0 & coin_collected == 1, 1, 0)),
+    grid_size = as.factor(grid_size),
+    density = as.factor(density)
+  )
+
+rm(control_low, control_medium, control_random, control_deceptive, 
+   avoid_low, avoid_medium,
+   ft_control_low, ft_control_medium, ft_avoid_low, ft_avoid_medium)
+
+head(full_data)
+```
+
+Grid level
+
+```{r}
+control_low_grid  <- loadData("control_low/coin_trajectory_metrics.csv", "control", "zero_shot") 
+control_medium_grid    <- loadData("control_medium/coin_trajectory_metrics.csv", "control", "zero_shot")
+control_random_grid   <- loadData("control_random/coin_trajectory_metrics.csv", "random", "zero_shot")
+control_deceptive_grid   <- loadData("control_deceptive/coin_trajectory_metrics.csv", "deceptive", "zero_shot")
+avoid_low_grid         <- loadData("avoid_low/coin_trajectory_metrics.csv", "avoid", "zero_shot")
+avoid_medium_grid      <- loadData("avoid_medium/coin_trajectory_metrics.csv", "avoid", "zero_shot")
+ft_control_low_grid    <- loadData("ft_control_low/coin_trajectory_metrics.csv", "control", "fine_tuned")
+ft_control_medium_grid <- loadData("ft_control_medium/coin_trajectory_metrics.csv", "control", "fine_tuned")
+ft_avoid_low_grid      <- loadData("ft_avoid_low/coin_trajectory_metrics.csv", "avoid", "fine_tuned")
+ft_avoid_medium_grid   <- loadData("ft_avoid_medium/coin_trajectory_metrics.csv", "avoid", "fine_tuned")
+full_data_grid <- rbind(
+  control_low_grid, control_medium_grid, control_random_grid, control_deceptive_grid,
+  avoid_low_grid, avoid_medium_grid,
+  ft_control_low_grid, ft_control_medium_grid, ft_avoid_low_grid, ft_avoid_medium_grid
+  ) 
+rm(control_low_grid, control_medium_grid, control_random_grid, control_deceptive_grid, 
+   avoid_low_grid, avoid_medium_grid,
+   ft_control_low_grid, ft_control_medium_grid, ft_avoid_low_grid, ft_avoid_medium_grid)
+head(full_data_grid)
+```
+
+Subsetting data for this specific round of analyses 
+
+```{r}
+traj_df <- full_data %>% 
+  filter(!trajectory_category %in% c("random_starts","reshuffled_walls"), 
+         !(model == "fine_tuned" & reasoning_effort == "medium")) %>%
+  mutate( # Ordering factors for mdl fitting 
+    trajectory_category = fct_relevel(trajectory_category, "base"),
+    grid_size = factor(grid_size,
+                       levels = c("7", "9", "11"),
+                       labels = c("Grid size 7", "Grid size 9", "Grid size 11"),
+                       ordered = TRUE),
+    density = factor(density,
+                     levels = c("0","0.2","0.4","0.6"),
+                     ordered = TRUE),
+    group = if_else(reasoning_effort == "medium",
+                    paste(group, reasoning_effort, sep = "_"), group),
+    group = if_else(model == "fine_tuned",
+                    paste(group, model, sep = "_"), group)
+  )
+
+grid_df <- full_data_grid %>%
+  filter(!trajectory_category %in% c("random_starts","reshuffled_walls"), !model == "fine_tuned") %>%
+  mutate( # Ordering factors for mdl fitting 
+    trajectory_category = fct_relevel(trajectory_category, "base"),
+    grid_size = factor(grid_size,
+                       levels = c("7", "9", "11"),
+                       labels = c("Grid size 7", "Grid size 9", "Grid size 11"),
+                       ordered = TRUE),
+    density = factor(density,
+                     levels = c("0","0.2","0.4","0.6"),
+                     ordered = TRUE)
+  )
+
+file_output <- "overall"
+```
+
+```{r}
+unique(traj_df$group)
+
+traj_df %>%
+  group_by(group) %>%
+  summarise(
+    n = n(),
+    n_grids = n_distinct(grid_key)
+    )
+```
+
+# Success
+
+```{r}
+grid_success_summary <- traj_df %>%
+  group_by(group, grid_size, density) %>%
+  summarise(
+    mean_goal = mean(goal_only),
+    se_goal = sd(goal_only)/sqrt(n()),
+    mean_coin = mean(coin_only),
+    se_coin = sd(coin_only)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n())
+  ) %>%
+  pivot_longer(
+    cols = -c(group,grid_size, density),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  mutate(
+    metric = factor(metric,
+                    levels = c("both", "coin", "goal")),
+    group = factor(group,
+                   levels = c("control", "control_medium", "control_fine_tuned", "deceptive",
+                              "random","avoid","avoid_medium", "avoid_fine_tuned"))
+    )
+
+grid_success_raw <- traj_df %>%
+  group_by(group, grid_size, density , grid_key) %>%
+  summarise(
+    mean_goal = mean(goal_only),
+    mean_coin = mean(coin_only),
+    mean_both = mean(coin_and_goal)
+  ) %>%
+  pivot_longer(
+    cols = -c(group, grid_size, density, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  mutate(
+    metric = factor(metric,
+                    levels = c("goal", "coin", "both")),
+    group = factor(group,
+                   levels = c("control", "control_medium", "control_fine_tuned", "deceptive",
+                              "random","avoid","avoid_medium", "avoid_fine_tuned"))
+  )
+
+p1 <- ggplot(grid_success_summary, aes(x = metric, y = mean, fill = group)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean - se, ymax = mean + se),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_jitter(
+    data = grid_success_raw,
+    aes(x = metric, y = mean, fill = group),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.1, shape = 16, show.legend = FALSE
+  ) +
+  facet_grid(density~grid_size,
+             labeller = labeller(
+             density = function(x) paste0("Density: ", x))
+             ) +
+  scale_x_discrete(
+    limits = c("both", "coin", "goal"),
+    labels = c(both = "Coin and terminal", coin = "Coin only",  goal = "Terminal only")
+  ) +
+  # scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  scale_fill_manual(
+    values = c("#c8c8c8", "#f0c571", "#59a89c", "#0b81a2",
+               "#e25759", "#9d2c00", "#7E4794", "#36b700"),
+    limits = c("control", "control_medium", "control_fine_tuned", "deceptive",
+               "random","avoid","avoid_medium", "avoid_fine_tuned"),  
+    labels = c("Baseline - low reasoning", "Baseline - medium reasoning",
+               "Baseline - fine tuned", "Deceptive - low reasoning", 
+               "Baseline - random agent", "Avoid - low reasoning", 
+               "Avoid - medium reasoning", "Avoid - fine tuned")  
+  ) +
+  labs(
+    # title = "Task Success by Grid Size and Density",
+    x = NULL,
+    y = "Task success",
+    fill = "Experimental condition"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+  )
+
+ggsave(
+  file.path("figures", file_output, "success_plot1.png"),
+  p1, width = 8, height = 8, dpi = 600
+)
+
+p1 
+```
+
+```{r}
+grid_success_summary <- traj_df %>%
+  group_by(group) %>%
+  summarise(
+    mean_goal = mean(goal_only),
+    se_goal = sd(goal_only)/sqrt(n()),
+    mean_coin = mean(coin_only),
+    se_coin = sd(coin_only)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n())
+  ) %>%
+  pivot_longer(
+    cols = -c(group),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  mutate(
+    metric = factor(metric,
+                    levels = c("both", "coin", "goal")),
+    group = factor(group,
+                   levels = c("control", "control_medium", "control_fine_tuned", "deceptive",
+                              "random","avoid","avoid_medium", "avoid_fine_tuned"))
+    )
+
+grid_success_raw <- traj_df %>%
+  group_by(group, grid_key) %>%
+  summarise(
+    mean_goal = mean(goal_only),
+    mean_coin = mean(coin_only),
+    mean_both = mean(coin_and_goal)
+  ) %>%
+  pivot_longer(
+    cols = -c(group, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  mutate(
+    metric = factor(metric,
+                    levels = c("goal", "coin", "both")),
+    group = factor(group,
+                   levels = c("control", "control_medium", "control_fine_tuned", "deceptive",
+                              "random","avoid","avoid_medium", "avoid_fine_tuned"))
+  )
+
+p2 <- ggplot(grid_success_summary, aes(x = metric, y = mean, fill = group)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean - se, ymax = mean + se),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_jitter(
+    data = grid_success_raw,
+    aes(x = metric, y = mean, fill = group),
+    position = position_jitterdodge(jitter.width = 0.1, jitter.height = 0.005, dodge.width = 0.8),
+    size = 0.8, alpha = 0.05, shape = 16, show.legend = FALSE
+  ) +
+  # facet_grid(density~grid_size,
+  #            labeller = labeller(
+  #            density = function(x) paste0("Density: ", x))
+  #            ) +
+  scale_x_discrete(
+    limits = c("both", "coin", "goal"),
+    labels = c(both = "Coin and terminal", coin = "Coin only",  goal = "Terminal only")
+  ) +
+  # scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  scale_fill_manual(
+    # values = c("#c8c8c8", "#f0c571", "#59a89c", "#0b81a2",
+    #            "#e25759", "#9d2c00", "#7E4794", "#36b700"),
+    values = c("#2c6fb0", "#7aa8d4", "#c3d7ec",   # control family, dark→light
+               "#7E4794",                          # deceptive
+               "#b0b0b0",                          # random
+               "#c0392b", "#e08079", "#f2c7c3"),
+    limits = c("control", "control_medium", "control_fine_tuned", "deceptive",
+               "random","avoid","avoid_medium", "avoid_fine_tuned"),  
+    labels = c("Collect - low reasoning", "Collect - medium reasoning",
+               "Collect - fine tuned", "Deceptive - low reasoning", 
+               "Baseline - random agent", "Avoid - low reasoning", 
+               "Avoid - medium reasoning", "Avoid - fine tuned")  
+  ) +
+  labs(
+    # title = "Task Success by Grid Size and Density",
+    x = NULL,
+    y = "Task success",
+    fill = "Experimental condition"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    # axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+  )
+
+ggsave(
+  file.path("figures", file_output, "success_plot2.png"),
+  p2, width = 9, height = 4, dpi = 600
+)
+
+p2 
+```
+
+## Baseline: all groups vs. random 
+
+```{r}
+success_mdl1 <- traj_df %>%
+  filter(!group %in% c("avoid","avoid_medium","avoid_fine_tuned")) %>%
+  mutate(group = relevel(factor(group), ref = "random")) %>%
+  glmer(
+    coin_and_goal ~ grid_size + density + group + coin_detour_distance + start_to_goal_via_coin_distance + (1 | grid_key),
+    data = .,
+    family = binomial(),
+    control = glmerControl(optimizer='bobyqa')
+  )
+
+summary(success_mdl1)
+```
+
+## Baseline: low vs. medium reasoning
+
+```{r}
+success_mdl2 <- traj_df %>%
+  filter(group %in% c("control","control_medium")) %>%
+  mutate(group = relevel(factor(group), ref = "control")) %>%
+  glmer(
+    coin_and_goal ~ group + (1 | grid_key),
+    data = .,
+    family = binomial(),
+    control = glmerControl(optimizer='bobyqa')
+  )
+
+summary(success_mdl2)
+```
+
+## Avoid: all vs random 
+
+```{r}
+avoid_success_mdl1 <- traj_df %>%
+  filter(group %in% c("random","avoid","avoid_medium")) %>%
+  mutate(group = relevel(factor(group), ref = "random")) %>%
+  glmer(
+    goal_only ~ group + (1 | grid_key),
+    data = .,
+    family = binomial(),
+    control = glmerControl(optimizer='bobyqa')
+  )
+
+summary(avoid_success_mdl1)
+```
+
+## Avoid: low vs medium
+
+```{r}
+avoid_success_mdl2 <- traj_df %>%
+  filter(group %in% c("avoid","avoid_medium")) %>%
+  mutate(group = relevel(factor(group), ref = "avoid")) %>%
+  glmer(
+    goal_only ~ group + (1 | grid_key),
+    data = .,
+    family = binomial(),
+    control = glmerControl(optimizer='bobyqa')
+  )
+
+summary(avoid_success_mdl2)
+```
+
+## Baseline low vs avoid low 
+
+```{r}
+baseline_success <- traj_df %>%
+  filter(group %in% c("control","control_medium")) %>%
+  mutate(
+    group = ifelse(group == "control_medium", "control", "control")
+  ) %>%
+  rename(success = coin_and_goal) %>%
+  select(group, reasoning_effort, grid_key, success)
+  
+avoid_success <- traj_df %>%
+  filter(group %in% c("avoid","avoid_medium")) %>%
+  mutate(
+    group = ifelse(group == "avoid_medium", "avoid", "avoid")
+  ) %>%
+  rename(success = goal_only) %>%
+  select(group, reasoning_effort, grid_key, success)
+
+success_df <- rbind(baseline_success, avoid_success)
+
+compare_success_mdl1 <- success_df %>%
+  mutate(
+    group = relevel(factor(group), ref = "control"),
+    reasoning_effort = relevel(factor(reasoning_effort), ref = "low")
+    ) %>%
+  glmer(
+    success ~ group + reasoning_effort + (1 | grid_key),
+    data = .,
+    family = binomial(),
+    control = glmerControl(optimizer='bobyqa')
+  )
+
+summary(compare_success_mdl1)
+```
+
+# Action accuracy 
+
+```{r}
+grid_accuracy_summary <- traj_df %>%
+  group_by(group) %>%
+  summarise(
+    mean_goal = mean(action_accuracy),
+    se_goal = sd(action_accuracy)/sqrt(n())
+  ) %>%
+  pivot_longer(
+    cols = -c(group),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  mutate(
+    group = factor(group,
+                   levels = c("control", "control_medium","deceptive","random","avoid","avoid_medium"))
+    )
+
+grid_accuracy_raw <- traj_df %>%
+  group_by(group, grid_key) %>%
+  summarise(
+    mean_goal = mean(action_accuracy)
+  ) %>%
+  pivot_longer(
+    cols = -c(group, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  mutate(
+    group = factor(group,
+                   levels = c("control", "control_medium","deceptive","random","avoid","avoid_medium"))
+  )
+
+p3 <- ggplot(grid_accuracy_summary, aes(x = group, y = mean, fill = group)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean - se, ymax = mean + se),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_jitter(
+    data = grid_accuracy_raw,
+    aes(x = group, y = mean, fill = group),
+    position = position_jitterdodge(jitter.width = 0.25, dodge.width = 0.8),
+    size = 0.8, alpha = 0.15, shape = 16, show.legend = FALSE
+  ) +
+  scale_x_discrete(
+    limits = c("control", "control_medium", "deceptive", "random"),
+    labels = c("Collect - low reasoning", "Collect - medium reasoning",
+               "Deceptive - low reasoning", "Baseline - random agent")
+  ) +
+  scale_fill_manual(
+    values = c("#2c6fb0", "#7aa8d4", "#7E4794","#b0b0b0"),
+    limits = c("control", "control_medium", "deceptive", "random")
+  ) +
+  labs(x = NULL, y = "Action accuracy") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    # axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  )
+
+ggsave(
+  file.path("figures", file_output, "accuracy_plot1.png"),
+  p3, width = 7, height = 5, dpi = 600
+)
+
+p3
+```
+
+```{r}
+grid_accuracy_summary <- traj_df %>%
+  group_by(group, grid_size, density) %>%
+  summarise(
+    mean_goal = mean(action_accuracy),
+    se_goal = sd(action_accuracy)/sqrt(n())
+  ) %>%
+  pivot_longer(
+    cols = -c(group, grid_size, density),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  mutate(
+    group = factor(group,
+                   levels = c("control", "control_medium","deceptive","random","avoid","avoid_medium"))
+    )
+
+grid_accuracy_raw <- traj_df %>%
+  group_by(group, grid_size, density, grid_key) %>%
+  summarise(
+    mean_goal = mean(action_accuracy)
+  ) %>%
+  pivot_longer(
+    cols = -c(group, grid_size, density, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  mutate(
+    group = factor(group,
+                   levels = c("control", "control_medium","deceptive","random","avoid","avoid_medium"))
+  )
+
+p4 <- ggplot(grid_accuracy_summary, aes(x = density, y = mean, fill = group)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean - se, ymax = mean + se),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_jitter(
+    data = grid_accuracy_raw,
+    aes(x = density, y = mean, fill = group),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.1, shape = 16, show.legend = FALSE
+  ) +
+  facet_wrap(~grid_size) +
+  # scale_x_discrete(
+  #   limits = c("both", "coin", "goal"),
+  #   labels = c(both = "Coin and terminal", coin = "Coin only",  goal = "Terminal only")
+  # ) +
+  # scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  scale_fill_manual(
+    values = c("#2066a8", "#8ec1da", "#cde1ec", "#f6d6c2", "#d47264", "#ae282c"),
+    limits = c("control", "control_medium","deceptive","random","avoid","avoid_medium"),  
+    labels = c("Baseline - low reasoning", "Baseline - medium reasoning", 
+               "Deceptive - low reasoning", "Baseline - random agent", 
+               "Avoid - low reasoning", "Avoid - medium reasoning")  
+  ) +
+  labs(
+    # title = "Task Success by Grid Size and Density",
+    x = "Density",
+    y = "Action accuracy",
+    fill = "Experimental condition"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    # axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+  )
+
+ggsave(
+  file.path("figures", file_output, "accuracy_plot2.png"),
+  p4, width = 9, height = 4, dpi = 600
+)
+
+p4
+```

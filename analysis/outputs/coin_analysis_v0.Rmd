@@ -1,0 +1,692 @@
+---
+title: "coin_analysis"
+output: html_document
+date: "2026-07-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+
+```{r}
+library(tidyverse)
+```
+
+# Low reasoning 7x7 grid
+
+```{r}
+grid7_df <- read.csv("archive/7_low/coin_per_trajectory_7_low.csv") %>%
+  mutate(
+    coin_and_goal = as.integer(reached_goal + coin_collected == 2),
+    goal_only = as.integer(ifelse(reached_goal == 1 & coin_collected == 0, 1, 0)),
+    coin_only = as.integer(ifelse(reached_goal == 0 & coin_collected == 1, 1, 0)),
+    grid_size = as.factor(grid_size),
+    density = as.factor(density)
+  )
+```
+
+```{r}
+grid7_summary <- grid7_df %>%
+  group_by(density, trajectory_category) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n()),
+    mean_coin_only = mean(coin_only),
+    se_coin_only = sd(coin_only)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(density, trajectory_category),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+grid7_summary
+```
+
+```{r}
+grid7_summary_by_grid <- grid7_df %>%
+  group_by(density, trajectory_category, grid_key) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n()),
+    mean_coin_only = mean(coin_only),
+    se_coin_only = sd(coin_only)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(density, trajectory_category, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+```
+
+## Grid size 7x7: overall task success (coin + terminal goal) by density and grid augments
+
+```{r}
+p1 <- ggplot() +
+  geom_col(data = filter(grid7_summary, metric == "both"), aes(x = trajectory_category, y = mean, fill = trajectory_category)) + 
+  geom_errorbar(data = filter(grid7_summary, metric == "both"), aes(x = trajectory_category, fill = trajectory_category, y = mean, ymin = mean - se, ymax = mean + se), width = 0.3,position = position_dodge(width = 0.9)) +
+  
+   geom_jitter(data = filter(grid7_summary_by_grid, metric == "both"), aes(x = trajectory_category, y = mean, fill = trajectory_category), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.2) +
+  
+  geom_col(position = "dodge") +
+  facet_wrap(~ density, labeller = label_both) +
+  labs(x = NULL, y = "Task success", fill = "Isometric transformation") +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p1
+
+# ggsave("figures/p1.png", p1, dpi = 600)
+```
+
+## Grid size 7x7: success metrics by grid density
+
+```{r}
+grid7_summary_density <- grid7_df %>%
+  group_by(density) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n()),
+    mean_coin_only = mean(coin_only),
+    se_coin_only = sd(coin_only)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(density),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  ungroup() %>%
+  filter(!metric %in% c("goal","coin"))
+
+grid7_summary_density_by_grid <- grid7_df %>%
+  group_by(density, grid_key) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n()),
+    mean_coin_only = mean(coin_only),
+    se_coin_only = sd(coin_only)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  ungroup() %>%
+  filter(!metric %in% c("goal","coin"))
+
+p2 <- ggplot() +
+  geom_col(data = grid7_summary_density, aes(x = metric, y = mean, fill = metric)) + 
+  geom_errorbar(data = grid7_summary_density, aes(x = metric, 
+                                          fill = metric, 
+                                          y = mean, 
+                                          ymin = mean - se, 
+                                          ymax = mean + se), 
+                width = 0.3,position = position_dodge(width = 0.9)) +
+  
+   geom_jitter(data = grid7_summary_density_by_grid, aes(x = metric, y = mean, fill = metric), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.1) +
+  
+  geom_col(position = "dodge") +
+  facet_wrap(~ density, labeller = label_both) +
+  labs(x = NULL, y = "Task success", fill = NULL) +
+  theme_light() + 
+  theme(legend.position = "none")
+
+p2
+
+# ggsave("figures/p2.png", p2, dpi = 600)
+```
+
+
+
+
+
+# Low reasoning pooled
+
+```{r}
+grid_low_df <- read.csv("control_low/coin_per_trajectory_low.csv") %>%
+  mutate(
+    coin_and_goal = as.integer(reached_goal + coin_collected == 2),
+    goal_only = as.integer(ifelse(reached_goal == 1 & coin_collected == 0, 1, 0)),
+    coin_only = as.integer(ifelse(reached_goal == 0 & coin_collected == 1, 1, 0)),
+    grid_size = as.factor(grid_size),
+    density = as.factor(density)
+  )
+```
+
+## Success metrics by density and grid size
+
+```{r}
+grid_low_summary_density <- grid_low_df %>%
+  group_by(density, grid_size) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n())
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+grid_low_summary_density_by_grid <- grid_low_df %>%
+  group_by(density, grid_size, grid_key) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n())
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+p3 <- ggplot() +
+  geom_col(data = grid_low_summary_density, aes(x = metric, y = mean, fill = metric)) + 
+  geom_errorbar(data = grid_low_summary_density, aes(x = metric, 
+                                          fill = metric, 
+                                          y = mean, 
+                                          ymin = mean - se, 
+                                          ymax = mean + se), 
+                width = 0.3,position = position_dodge(width = 0.9)) +
+  
+   geom_jitter(data = grid_low_summary_density_by_grid, aes(x = metric, y = mean, fill = metric), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.05) +
+  
+  geom_col(position = "dodge") +
+  
+  facet_grid(grid_size ~ density, labeller = label_both) +
+  labs(x = NULL, y = "Task success", fill = NULL) +
+  theme_light() 
+  # theme(axis.text.x = element_text(hjust = 1))
+p3 
+
+# ggsave("figures/p3.png", p3, dpi = 600)
+```
+
+## Distance of coin away from the path between start and goal
+
+```{r}
+grid_low_detour <- grid_low_df %>%
+  filter(!trajectory_category %in% c("random_starts", "reshuffled_walls")) %>%
+  group_by(density, grid_size, grid_key, coin_detour_distance) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n())
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size, grid_key, coin_detour_distance),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  filter(coin_detour_distance >= 0) %>%
+  mutate(
+    grid_size = as.factor(grid_size)
+  )
+```
+
+Detour distance predicting rate of coin collection 
+
+```{r}
+p4 <- grid_low_detour %>%
+  filter(metric == "coin") %>%
+  ggplot(aes(x = coin_detour_distance, y = mean)) +
+  geom_jitter(width = 0.3, height = 0.02, alpha = 0.3) +
+  geom_smooth(method = "lm", alpha = 0.4, size = 1, color = "red", linewidth = 1) +
+  labs(x = "Distance of coin away from start-end route", y = "Proportion of trajectories with coin collected") +
+  theme_light()
+
+p4
+# ggsave("figures/p4.png", p4, dpi = 600)
+```
+
+```{r}
+grid_low_detour %>%
+  filter(metric == "both") %>%
+  ggplot(aes(x = coin_detour_distance, y = mean)) +
+  geom_jitter(width = 0.3, height = 0.02, alpha = 0.3) +
+  geom_smooth(method = "lm", alpha = 0.4, size = 1, color = "red", linewidth = 1) +
+  labs(x = "Distance of coin away from start-end route", y = "Proportion of successful trajectories") +
+  theme_light()
+```
+
+```{r}
+p5 <- grid_low_detour %>%
+  filter(metric == "goal_only") %>%
+  ggplot(aes(x = coin_detour_distance, y = mean)) +
+  geom_jitter(width = 0.3, height = 0.02, alpha = 0.3) +
+  geom_smooth(method = "lm", alpha = 0.4, size = 1, color = "red", linewidth = 1) +
+  labs(x = "Distance of coin away from start-end route", y = "Proportion of trajectories with only terminal goal") +
+  theme_light()
+p5
+# ggsave("figures/p5.png", p5, dpi = 600)
+```
+
+## Action accuracy
+
+### Action accuracy to coin 
+
+```{r}
+grid_low_coin_accuracy_summary <- grid_low_df %>%
+  filter(!trajectory_category %in% c("random_starts", "reshuffled_walls")) %>%
+  group_by(density, grid_size) %>%
+  summarise(
+    mean_accuracy = mean(action_accuracy_phase1),
+    se_accuracy = sd(action_accuracy_phase1)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) 
+
+grid_low_coin_accuracy <- grid_low_df %>%
+  filter(!trajectory_category %in% c("random_starts", "reshuffled_walls"))
+
+p6 <- ggplot() +
+  geom_col(data = grid_low_coin_accuracy_summary, aes(x = grid_size, y = mean, fill = grid_size)) + 
+  geom_errorbar(data = grid_low_coin_accuracy_summary, aes(x = grid_size, 
+                                          y = mean, 
+                                          ymin = mean - se, 
+                                          ymax = mean + se), 
+                width = 0.3, position = position_dodge(width = 0.9)) +
+  
+   geom_jitter(data = grid_low_coin_accuracy, aes(x = grid_size, y = action_accuracy_phase1), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.05) +
+  
+  geom_col(position = "dodge") +
+  
+  facet_wrap(~ density, labeller = label_both) +
+  labs(x = NULL, y = "Task success", fill = "Grid size") +
+  theme_light() 
+  # theme(axis.text.x = element_text(hjust = 1))
+p6 
+
+# ggsave("figures/p6.png", p6, dpi = 600)
+```
+
+### Overall action accuracy (for those that collect coin and reach goal) 
+
+```{r}
+grid_low_coin_accuracy_summary <- grid_low_df %>%
+  filter(!trajectory_category %in% c("random_starts", "reshuffled_walls"), coin_and_goal == 1) %>%
+  group_by(density, grid_size) %>%
+  summarise(
+    mean_accuracy = mean(action_accuracy),
+    se_accuracy = sd(action_accuracy)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) 
+
+grid_low_coin_accuracy <- grid_low_df %>%
+  filter(!trajectory_category %in% c("random_starts", "reshuffled_walls"), coin_and_goal == 1)
+
+p7 <- ggplot() +
+  geom_col(data = grid_low_coin_accuracy_summary, aes(x = grid_size, y = mean, fill = grid_size)) + 
+  geom_errorbar(data = grid_low_coin_accuracy_summary, aes(x = grid_size, 
+                                          y = mean, 
+                                          ymin = mean - se, 
+                                          ymax = mean + se), 
+                width = 0.3, position = position_dodge(width = 0.9)) +
+  
+   geom_jitter(data = grid_low_coin_accuracy, aes(x = grid_size, y = action_accuracy), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.05) +
+  
+  geom_col(position = "dodge") +
+  
+  facet_wrap(~density, labeller = label_both) +
+  labs(x = NULL, y = "Task success", fill = "Grid size") +
+  theme_light() 
+  # theme(axis.text.x = element_text(hjust = 1))
+p7
+
+# ggsave("figures/p7.png", p7, dpi = 600)
+```
+
+# Medium reasoning pooled
+
+```{r}
+grid_medium_df <- read.csv("control_medium/coin_per_trajectory_medium.csv") %>%
+  mutate(
+    coin_and_goal = as.integer(reached_goal + coin_collected == 2),
+    goal_only = as.integer(ifelse(reached_goal == 1 & coin_collected == 0, 1, 0)),
+    grid_size = as.factor(grid_size),
+    density = as.factor(density)
+  )
+```
+
+## Success metrics by density and grid size
+
+```{r}
+grid_medium_summary_density <- grid_medium_df %>%
+  group_by(density, grid_size) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n())
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+grid_medium_summary_density_by_grid <- grid_medium_df %>%
+  group_by(density, grid_size, grid_key) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n())
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+p8 <- ggplot() +
+  geom_col(data = grid_medium_summary_density, aes(x = metric, y = mean, fill = metric)) + 
+  geom_errorbar(data = grid_medium_summary_density, aes(x = metric, 
+                                          fill = metric, 
+                                          y = mean, 
+                                          ymin = mean - se, 
+                                          ymax = mean + se), 
+                width = 0.3,position = position_dodge(width = 0.9)) +
+  
+   geom_jitter(data = grid_medium_summary_density_by_grid, aes(x = metric, y = mean, fill = metric), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.05) +
+  
+  geom_col(position = "dodge") +
+  
+  facet_grid(grid_size ~ density, labeller = label_both) +
+  labs(x = NULL, y = "Task success", fill = NULL) +
+  theme_light() 
+  # theme(axis.text.x = element_text(hjust = 1))
+p8 
+
+# ggsave("figures/p8.png", p8, dpi = 600)
+```
+
+## Distance of coin away from the path between start and goal
+
+```{r}
+grid_medium_detour <- grid_medium_df %>%
+  filter(!trajectory_category %in% c("random_starts", "reshuffled_walls")) %>%
+  group_by(density, grid_size, grid_key, coin_detour_distance) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n())
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size, grid_key, coin_detour_distance),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  filter(coin_detour_distance >= 0) %>%
+  mutate(
+    grid_size = as.factor(grid_size)
+  )
+```
+
+Detour distance predicting rate of coin collection 
+
+```{r}
+p9 <- grid_medium_detour %>%
+  filter(metric == "coin") %>%
+  ggplot(aes(x = coin_detour_distance, y = mean)) +
+  geom_jitter(width = 0.3, height = 0.02, alpha = 0.3) +
+  geom_smooth(method = "lm", alpha = 0.4, size = 1, color = "red", linewidth = 1) +
+  labs(x = "Distance of coin away from start-end route", y = "Proportion of trajectories with coin collected") +
+  theme_light()
+
+p9
+# ggsave("figures/p9.png", p9, dpi = 600)
+```
+
+```{r}
+grid_medium_detour %>%
+  filter(metric == "both") %>%
+  ggplot(aes(x = coin_detour_distance, y = mean)) +
+  geom_jitter(width = 0.3, height = 0.02, alpha = 0.3) +
+  geom_smooth(method = "lm", alpha = 0.4, size = 1, color = "red", linewidth = 1) +
+  labs(x = "Distance of coin away from start-end route", y = "Proportion of successful trajectories") +
+  theme_light()
+```
+
+```{r}
+p10 <- grid_medium_detour %>%
+  filter(metric == "goal_only") %>%
+  ggplot(aes(x = coin_detour_distance, y = mean)) +
+  geom_jitter(width = 0.3, height = 0.02, alpha = 0.3) +
+  geom_smooth(method = "lm", alpha = 0.4, size = 1, color = "red", linewidth = 1) +
+  labs(x = "Distance of coin away from start-end route", y = "Proportion of trajectories with only terminal goal") +
+  theme_light()
+p10
+# ggsave("figures/p10.png", p10, dpi = 600)
+```
+
+## Action accuracy
+
+### Action accuracy to coin 
+
+```{r}
+grid_medium_coin_accuracy_summary <- grid_medium_df %>%
+  filter(!trajectory_category %in% c("random_starts", "reshuffled_walls")) %>%
+  group_by(density, grid_size) %>%
+  summarise(
+    mean_accuracy = mean(action_accuracy_phase1),
+    se_accuracy = sd(action_accuracy_phase1)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) 
+
+grid_medium_coin_accuracy <- grid_medium_df %>%
+  filter(!trajectory_category %in% c("random_starts", "reshuffled_walls"))
+
+p11 <- ggplot() +
+  geom_col(data = grid_medium_coin_accuracy_summary, aes(x = grid_size, y = mean, fill = grid_size)) + 
+  geom_errorbar(data = grid_medium_coin_accuracy_summary, aes(x = grid_size, 
+                                          y = mean, 
+                                          ymin = mean - se, 
+                                          ymax = mean + se), 
+                width = 0.3, position = position_dodge(width = 0.9)) +
+  
+   geom_jitter(data = grid_medium_coin_accuracy, aes(x = grid_size, y = action_accuracy_phase1), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.05) +
+  
+  geom_col(position = "dodge") +
+  
+  facet_wrap(~ density, labeller = label_both) +
+  labs(x = NULL, y = "Task success", fill = "Grid size") +
+  theme_light() 
+  # theme(axis.text.x = element_text(hjust = 1))
+p11
+
+# ggsave("figures/p6.png", p6, dpi = 600)
+```
+
+### Overall action accuracy (for those that collect coin and reach goal) 
+
+```{r}
+grid_medium_coin_accuracy_summary <- grid_medium_df %>%
+  filter(!trajectory_category %in% c("random_starts", "reshuffled_walls"), coin_and_goal == 1) %>%
+  group_by(density, grid_size) %>%
+  summarise(
+    mean_accuracy = mean(action_accuracy),
+    se_accuracy = sd(action_accuracy)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) 
+
+grid_medium_coin_accuracy <- grid_medium_df %>%
+  filter(!trajectory_category %in% c("random_starts", "reshuffled_walls"), coin_and_goal == 1)
+
+p12 <- ggplot() +
+  geom_col(data = grid_medium_coin_accuracy_summary, aes(x = grid_size, y = mean, fill = grid_size)) + 
+  geom_errorbar(data = grid_medium_coin_accuracy_summary, aes(x = grid_size, 
+                                          y = mean, 
+                                          ymin = mean - se, 
+                                          ymax = mean + se), 
+                width = 0.3, position = position_dodge(width = 0.9)) +
+  
+   geom_jitter(data = grid_medium_coin_accuracy, aes(x = grid_size, y = action_accuracy), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.05) +
+  
+  geom_col(position = "dodge") +
+  
+  facet_wrap(~density, labeller = label_both) +
+  labs(x = NULL, y = "Task success", fill = "Grid size") +
+  theme_light() 
+  # theme(axis.text.x = element_text(hjust = 1))
+p12
+
+# ggsave("figures/p7.png", p7, dpi = 600)
+```
+
+# Low reasoning avoid coin
+
+```{r}
+grid_avoid_low_df <- read.csv("avoid_low/coin_per_trajectory_low.csv") %>%
+  mutate(
+    coin_and_goal = as.integer(reached_goal + coin_collected == 2),
+    goal_only = as.integer(ifelse(reached_goal == 1 & coin_collected == 0, 1, 0)),
+    coin_only = as.integer(ifelse(reached_goal == 0 & coin_collected == 1, 1, 0)),
+    grid_size = as.factor(grid_size),
+    density = as.factor(density)
+  )
+```
+
+## Success metrics by density and grid size
+
+```{r}
+grid_avoid_low_summary_density <- grid_avoid_low_df %>%
+  group_by(density, grid_size) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal_only = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n()),
+    mean_coin_only = mean(coin_only),
+    se_coin_only = sd(coin_only)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+grid_avoid_low_summary_density_by_grid <- grid_avoid_low_df %>%
+  group_by(density, grid_size, grid_key) %>%
+  summarise(
+    mean_goal = mean(reached_goal),
+    se_goal_only = sd(reached_goal)/sqrt(n()),
+    mean_coin = mean(coin_collected),
+    se_coin = sd(coin_collected)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n()),
+    mean_goal_only = mean(goal_only),
+    se_goal_only = sd(goal_only)/sqrt(n()),
+    mean_coin_only = mean(coin_only),
+    se_coin_only = sd(coin_only)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+p13 <- ggplot() +
+  geom_col(data = grid_avoid_low_summary_density, aes(x = metric, y = mean, fill = metric)) + 
+  geom_errorbar(data = grid_avoid_low_summary_density, aes(x = metric, 
+                                          fill = metric, 
+                                          y = mean, 
+                                          ymin = mean - se, 
+                                          ymax = mean + se), 
+                width = 0.3,position = position_dodge(width = 0.9)) +
+  
+   geom_jitter(data = grid_avoid_low_summary_density_by_grid, aes(x = metric, y = mean, fill = metric), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.05) +
+  
+  geom_col(position = "dodge") +
+  
+  facet_grid(grid_size ~ density, labeller = label_both) +
+  labs(x = NULL, y = "Task success", fill = NULL) +
+  theme_light() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p13 
+
+# ggsave("figures/p3.png", p3, dpi = 600)
+```
+
+
+
+
+
+# Compare capability metrics between low, medium, random, optimal, and fine tuned models 
+
+
+
+
+
+
+
+
+
+

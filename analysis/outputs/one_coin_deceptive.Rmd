@@ -1,0 +1,685 @@
+---
+title: "one_coin_analysis_v2"
+output: html_document
+date: "2026-08-05"
+---
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(lme4)
+library(ggthemes)
+library(mclogit)
+library(nnet)
+library(parameters)
+library(DirichletReg) 
+```
+
+# Compiling datasets 
+
+Trajectory level
+
+```{r}
+loadData <- function(path, group, model) {
+  df <- read.csv(path)
+  df$group <- group # Keeping track of experimental condition 
+  df$model <- model # Keeping track of model zero-shot or fine-tuned 
+  df
+}
+
+control_low  <- loadData("control_low/coin_per_trajectory.csv", "control", "zero_shot") 
+control_medium    <- loadData("control_medium/coin_per_trajectory.csv", "control", "zero_shot")
+control_random   <- loadData("control_random/coin_per_trajectory.csv", "random", "zero_shot")
+control_deceptive   <- loadData("control_deceptive/coin_per_trajectory.csv", "deceptive", "zero_shot")
+
+avoid_low         <- loadData("avoid_low/coin_per_trajectory.csv", "avoid", "zero_shot")
+avoid_medium      <- loadData("avoid_medium/coin_per_trajectory.csv", "avoid", "zero_shot")
+
+ft_control_low    <- loadData("ft_control_low/coin_per_trajectory.csv", "control", "fine_tuned")
+ft_control_medium <- loadData("ft_control_medium/coin_per_trajectory.csv", "control", "fine_tuned")
+ft_avoid_low      <- loadData("ft_avoid_low/coin_per_trajectory.csv", "avoid", "fine_tuned")
+ft_avoid_medium   <- loadData("ft_avoid_medium/coin_per_trajectory.csv", "avoid", "fine_tuned")
+
+
+full_data <- rbind(
+  control_low, control_medium, control_random, control_deceptive,
+  avoid_low, avoid_medium,
+  ft_control_low, ft_control_medium, ft_avoid_low, ft_avoid_medium
+  ) %>%
+  mutate(
+    coin_and_goal = as.integer(reached_goal + coin_collected == 2),
+    goal_only = as.integer(ifelse(reached_goal == 1 & coin_collected == 0, 1, 0)),
+    coin_only = as.integer(ifelse(reached_goal == 0 & coin_collected == 1, 1, 0)),
+    grid_size = as.factor(grid_size),
+    density = as.factor(density)
+  )
+
+rm(control_low, control_medium, control_random, control_deceptive, 
+   avoid_low, avoid_medium,
+   ft_control_low, ft_control_medium, ft_avoid_low, ft_avoid_medium)
+
+head(full_data)
+```
+
+Grid level
+
+```{r}
+control_low_grid  <- loadData("control_low/coin_trajectory_metrics.csv", "control", "zero_shot") 
+control_medium_grid    <- loadData("control_medium/coin_trajectory_metrics.csv", "control", "zero_shot")
+control_random_grid   <- loadData("control_random/coin_trajectory_metrics.csv", "random", "zero_shot")
+control_deceptive_grid   <- loadData("control_deceptive/coin_trajectory_metrics.csv", "deceptive", "zero_shot")
+avoid_low_grid         <- loadData("avoid_low/coin_trajectory_metrics.csv", "avoid", "zero_shot")
+avoid_medium_grid      <- loadData("avoid_medium/coin_trajectory_metrics.csv", "avoid", "zero_shot")
+ft_control_low_grid    <- loadData("ft_control_low/coin_trajectory_metrics.csv", "control", "fine_tuned")
+ft_control_medium_grid <- loadData("ft_control_medium/coin_trajectory_metrics.csv", "control", "fine_tuned")
+ft_avoid_low_grid      <- loadData("ft_avoid_low/coin_trajectory_metrics.csv", "avoid", "fine_tuned")
+ft_avoid_medium_grid   <- loadData("ft_avoid_medium/coin_trajectory_metrics.csv", "avoid", "fine_tuned")
+full_data_grid <- rbind(
+  control_low_grid, control_medium_grid, control_random_grid, control_deceptive_grid,
+  avoid_low_grid, avoid_medium_grid,
+  ft_control_low_grid, ft_control_medium_grid, ft_avoid_low_grid, ft_avoid_medium_grid
+  ) 
+rm(control_low_grid, control_medium_grid, control_random_grid, control_deceptive_grid, 
+   avoid_low_grid, avoid_medium_grid,
+   ft_control_low_grid, ft_control_medium_grid, ft_avoid_low_grid, ft_avoid_medium_grid)
+head(full_data_grid)
+```
+
+Subsetting data for this specific round of analyses 
+
+```{r}
+traj_df <- full_data %>% 
+  filter(!trajectory_category %in% c("random_starts","reshuffled_walls"),
+         group == "deceptive", model == "zero_shot", reasoning_effort == "low") %>%
+  mutate( # Ordering factors for mdl fitting 
+    trajectory_category = fct_relevel(trajectory_category, "base"),
+    grid_size = factor(grid_size,
+                       levels = c("7", "9", "11"),
+                       labels = c("Grid size 7", "Grid size 9", "Grid size 11"),
+                       ordered = TRUE),
+    density = factor(density,
+                     levels = c("0","0.2","0.4","0.6"),
+                     ordered = TRUE)
+  )
+
+grid_df <- full_data_grid %>%
+  filter(!trajectory_category %in% c("random_starts","reshuffled_walls"),
+         group == "deceptive", model == "zero_shot", reasoning_effort == "low") %>%
+  mutate( # Ordering factors for mdl fitting 
+    trajectory_category = fct_relevel(trajectory_category, "base"),
+    grid_size = factor(grid_size,
+                       levels = c("7", "9", "11"),
+                       labels = c("Grid size 7", "Grid size 9", "Grid size 11"),
+                       ordered = TRUE),
+    density = factor(density,
+                     levels = c("0","0.2","0.4","0.6"),
+                     ordered = TRUE)
+  )
+
+file_output <- "one_coin_deceptive"
+```
+
+# Success
+
+```{r}
+grid_success_summary <- traj_df %>%
+  group_by(density, grid_size) %>%
+  summarise(
+    mean_goal = mean(goal_only),
+    se_goal = sd(goal_only)/sqrt(n()),
+    mean_coin = mean(coin_only),
+    se_coin = sd(coin_only)/sqrt(n()),
+    mean_both = mean(coin_and_goal),
+    se_both = sd(coin_and_goal)/sqrt(n())
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  mutate(
+    metric = factor(metric, 
+                    levels = c("both", "coin", "goal"))
+    )
+
+grid_success_raw <- traj_df %>%
+  group_by(density, grid_size, grid_key) %>%
+  summarise(
+    mean_goal = mean(goal_only),
+    mean_coin = mean(coin_only),
+    mean_both = mean(coin_and_goal)
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  ) %>%
+  mutate(
+    metric = factor(metric, 
+                    levels = c("goal", "coin", "both"))
+  )
+
+p1 <- ggplot(grid_success_summary, aes(x = metric, y = mean, fill = density)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean - se, ymax = mean + se),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_jitter(
+    data = grid_success_raw,
+    aes(x = metric, y = mean, fill = density),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.1, shape = 16, show.legend = FALSE
+  ) +
+  facet_wrap(~grid_size) +
+  scale_x_discrete(
+    limits = c("both", "coin", "goal"),
+    labels = c(both = "Coin and terminal", coin = "Coin only",  goal = "Terminal only")
+  ) +
+  scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  labs(
+    # title = "Task Success by Grid Size and Density",
+    x = NULL,
+    y = "Task success",
+    fill = "Density"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+  )
+
+p1
+ggsave(
+  file.path("figures", file_output, "success_plot.png"),
+  p1, width = 8, height = 4, dpi = 600
+)
+```
+
+```{r}
+success_mdl1 <- glmer(
+  coin_and_goal ~ grid_size + density  + (1 | grid_key),
+  data = traj_df,
+  family = binomial(),
+  control=glmerControl(optimizer='bobyqa')
+)
+
+summary(success_mdl1)
+```
+
+```{r}
+success_mdl2 <- glmer(
+  coin_and_goal ~ grid_size + density + coin_detour_distance + start_to_goal_via_coin_distance + (1 | grid_key),
+  data = traj_df,
+  family = binomial(),
+  control=glmerControl(optimizer='bobyqa')
+)
+
+summary(success_mdl2)
+```
+
+# Accuracy and uncertainty 
+
+```{r}
+# --- 1. Rename columns to a consistent measure_phase pattern -----------------
+metrics_renamed <- grid_df %>%
+  rename(
+    accuracy_overall         = mean_action_accuracy,
+    accuracy_phase1          = mean_action_accuracy_phase1,
+    accuracy_phase2          = mean_action_accuracy_phase2,
+    entropy_overall         = mean_entropy,
+    entropy_phase1          = mean_entropy_phase1,
+    entropy_phase2          = mean_entropy_phase2,
+    jsd_overall             = mean_jsd,
+    jsd_phase1              = mean_jsd_phase1,
+    jsd_phase2              = mean_jsd_phase2,
+  ) %>%
+  mutate(
+    grid_size = factor(grid_size),
+    density   = factor(density)
+  )
+
+# --- 2. Reshape to long format, keeping every raw row (for jitter) ----------
+metrics_long_raw <- metrics_renamed %>%
+  select(grid_size, density,
+         accuracy_overall, accuracy_phase1, accuracy_phase2, 
+         entropy_overall,        entropy_phase1,        entropy_phase2,
+         jsd_overall,            jsd_phase1,            jsd_phase2) %>%
+  pivot_longer(
+    cols = -c(grid_size, density),
+    names_to = c("measure", "phase"),
+    names_pattern = "(accuracy|entropy|jsd|optimalentropy)_(overall|phase1|phase2)",
+    values_to = "value"
+  ) %>%
+  mutate(
+    measure = factor(measure,
+                      levels = c("accuracy", "entropy", "jsd", "optimalentropy"),
+                      labels = c("Accuracy", "Entropy", "JSD", "Optimal Entropy")),
+    phase   = factor(phase, levels = c("overall", "phase1", "phase2"),
+                      labels = c("Overall", "Coin", "Terminal"))
+  )
+
+# --- 3. Mean and SE per grid_size x density x measure x phase ---------------
+metrics_long_stats <- metrics_long_raw %>%
+  group_by(grid_size, density, measure, phase) %>%
+  summarise(
+    mean_val = mean(value, na.rm = TRUE),
+    se_val   = sd(value, na.rm = TRUE) / sqrt(sum(!is.na(value))),
+    .groups = "drop"
+  )
+
+# --- 4. Plot: bars + SE error bars + jittered raw points --------------------
+p2 <- ggplot(metrics_long_stats, aes(x = phase, y = mean_val, fill = density)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean_val - se_val, ymax = mean_val + se_val),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_jitter(
+    data = metrics_long_raw,
+    aes(x = phase, y = value, fill = density),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.1, shape = 16, show.legend = FALSE
+  ) +
+  facet_grid(measure ~ grid_size) +
+  labs(
+    # title = "Accuracy, Entropy, JSD, and Optimal Entropy by Phase, Grid Size, and Density",
+    x = "Phase",
+    y = "Value",
+    fill = "Density"
+  ) +
+  scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+
+p2 
+ggsave(
+  file.path("figures", file_output, "accuracy_entropy_jsd.png"),
+  p2, width = 8, height = 6, dpi = 600
+)
+```
+
+```{r}
+accuracy_mdl1 <- lmer(
+  action_accuracy ~ grid_size + density  + coin_detour_distance + start_to_goal_via_coin_distance + (1 | grid_key),
+  data = traj_df,
+  control= lmerControl(optimizer='bobyqa')
+)
+
+model_parameters(accuracy_mdl1, ci_method="kr")
+```
+
+```{r}
+entropy_mdl1 <- lm(
+  mean_entropy ~ grid_size + density  + coin_detour_distance  + start_to_goal_via_coin_distance,
+  data = grid_df
+)
+
+summary(entropy_mdl1)
+```
+
+
+```{r}
+jsd_mdl1 <- lm(
+  mean_jsd ~ grid_size + density  + coin_detour_distance  + start_to_goal_via_coin_distance,
+  data = grid_df
+)
+
+summary(jsd_mdl1)
+```
+
+SPL 
+
+```{r}
+spl_summary <- traj_df %>%
+  group_by(density, grid_size) %>%
+  summarise(
+    mean_spl = mean(spl),
+    se_spl = sd(spl)/sqrt(n()),
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+spl_raw <- traj_df %>%
+  group_by(density, grid_size, grid_key) %>%
+  summarise(
+    mean_spl = mean(spl),
+  ) %>%
+  pivot_longer(
+    cols = -c(density, grid_size, grid_key),
+    names_to = c(".value", "metric"),
+    names_pattern = "(mean|se)_(.*)"
+  )
+
+p3 <- ggplot(spl_summary, aes(x = grid_size, y = mean, fill = density)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean - se, ymax = mean + se),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_jitter(
+    data = spl_raw,
+    aes(x = grid_size, y = mean, fill = density),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.3, shape = 16, show.legend = FALSE
+  ) +
+  # facet_wrap(~grid_size, labeller = label_both) +
+  # scale_x_discrete(
+  #   limits = c("goal", "coin", "both"),
+  #   labels = c(goal = "Terminal only", coin = "Coin only", both = "Coin and terminal")
+  # ) +
+  labs(
+    # title = "Success weighted by path length (SPL) by Grid Size and Density",
+    x = NULL,
+    y = "SPL",
+    fill = "Density"
+  ) +
+  scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    # axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+  )
+
+p3
+ggsave(
+  file.path("figures", file_output, "spl.png"),
+  p3, width = 8, height = 4, dpi = 600
+)
+```
+
+```{r}
+spl_mdl1 <- lmer(
+  spl ~ grid_size + density  + coin_detour_distance + start_to_goal_via_coin_distance + (1 | grid_key),
+  data = traj_df,
+  control= lmerControl(optimizer='bobyqa')
+)
+
+model_parameters(spl_mdl1, ci_method="kr")
+```
+
+# Movement 
+
+## Cardinal actions  
+
+```{r}
+# --- 1. Reshape action counts to long format ---------------------------------
+actions_long_raw <- traj_df %>%
+  select(grid_size, density,
+         num_actions_up, num_actions_down, num_actions_left, num_actions_right) %>%
+  pivot_longer(
+    cols = starts_with("num_actions_"),
+    names_to = "action",
+    names_prefix = "num_actions_",
+    values_to = "count"
+  ) %>%
+  mutate(
+    action = factor(action, levels = c("up", "down", "left", "right"),
+                     labels = c("Up", "Down", "Left", "Right"))
+  )
+
+# --- 2. Mean and SE per grid_size x density x action -------------------------
+actions_long_stats <- actions_long_raw %>%
+  group_by(grid_size, density, action) %>%
+  summarise(
+    mean_count = mean(count, na.rm = TRUE),
+    se_count   = sd(count, na.rm = TRUE) / sqrt(sum(!is.na(count))),
+    .groups = "drop"
+  )
+
+# --- 3. Plot A: raw counts — bars + SE error bars + jittered raw points -----
+p4 <- ggplot(actions_long_stats, aes(x = action, y = mean_count, fill = density)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean_count - se_count, ymax = mean_count + se_count),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_jitter(
+    data = actions_long_raw,
+    aes(x = action, y = count, fill = density),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.015, shape = 16, show.legend = FALSE
+  ) +
+  facet_wrap(~ grid_size) +
+  labs(
+    # title = "Mean Cardinal Action Counts by Grid Size and Density",
+    x = NULL,
+    y = "Count",
+    fill = "Density"
+  ) +
+  scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+
+p4
+ggsave(
+  file.path("figures", file_output, "action.png"),
+  p4, width = 8, height = 5, dpi = 600
+)
+```
+
+```{r}
+# --- 4. Plot B: proportions — stacked bars ------------------------------------
+# Compute each trajectory's own action proportions first, then average within group
+actions_prop_raw <- full_data %>%
+  select(grid_size, density,
+         num_actions_up, num_actions_down, num_actions_left, num_actions_right) %>%
+  mutate(total = num_actions_up + num_actions_down + num_actions_left + num_actions_right) %>%
+  filter(total > 0) %>%   # drop trajectories with zero actions to avoid div-by-zero
+  mutate(
+    prop_up    = num_actions_up    / total,
+    prop_down  = num_actions_down  / total,
+    prop_left  = num_actions_left  / total,
+    prop_right = num_actions_right / total
+  ) %>%
+  select(grid_size, density, starts_with("prop_")) %>%
+  pivot_longer(
+    cols = starts_with("prop_"),
+    names_to = "action",
+    names_prefix = "prop_",
+    values_to = "proportion"
+  ) %>%
+  mutate(
+    action = factor(action, levels = c("up", "down", "left", "right"),
+                     labels = c("Up", "Down", "Left", "Right"))
+  )
+
+actions_prop_stats <- actions_prop_raw %>%
+  group_by(grid_size, density, action) %>%
+  summarise(mean_prop = mean(proportion, na.rm = TRUE), .groups = "drop")
+
+ggplot(actions_prop_stats, aes(x = density, y = mean_prop, fill = action)) +
+  geom_col(position = "stack", width = 0.7, alpha = 0.9,
+           colour = "black", linewidth = 0.3) +
+  facet_wrap(~ grid_size, labeller = label_both) +
+  labs(
+    title = "Mean Cardinal Action Proportions by Grid Size and Density",
+    x = "Density",
+    y = "Proportion",
+    fill = "Action"
+  ) +
+  scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+```
+
+```{r}
+direction_long <- traj_df %>%
+  mutate(
+    traj_uid = interaction(grid_key, trajectory_id, drop = TRUE)
+  ) %>%
+  pivot_longer(
+    cols = all_of(c("num_actions_up", "num_actions_down",
+                "num_actions_left", "num_actions_right")),
+    names_to = "direction",
+    names_prefix = "num_actions_",
+    values_to = "count"
+  ) %>%
+  mutate(direction = factor(direction)) %>%
+  select(count, direction, grid_size, density, trajectory_length, traj_uid, grid_key)
+
+
+action_null <- glmer(count ~ offset(log(trajectory_length))
+            + (direction | traj_uid)
+            + (1 | grid_key),
+            family = poisson, data = direction_long)
+
+action_mdl1 <- glmer(count ~ direction
+            + offset(log(trajectory_length))
+            + (direction | traj_uid)
+            + (1 | grid_key),
+            family = poisson, data = direction_long)
+
+anova(action_null, action_mdl1)
+```
+
+```{r}
+summary(action_mdl1)
+```
+
+## Quadrant 
+
+Note: proportions excluding midline
+
+```{r}
+# --- 1. Reshape to long format, keeping every raw row (for jitter) ----------
+quadrant_long_raw <- traj_df %>%
+  mutate(
+    grid_size = factor(grid_size),
+    density   = factor(density)
+  ) %>%
+  select(grid_size, density, grid_key,
+         quadrant_fraction_ul, quadrant_fraction_ur,
+         quadrant_fraction_dl, quadrant_fraction_dr) %>%
+  pivot_longer(
+    cols = -c(grid_size, density, grid_key),
+    names_to = "quadrant",
+    names_prefix = "quadrant_fraction_",
+    values_to = "value"
+  ) %>%
+  mutate(
+    quadrant = factor(quadrant,
+                       levels = c("ul", "ur", "dl", "dr"),
+                       labels = c("Upper Left", "Upper Right", "Lower Left", "Lower Right"))
+  )
+
+# --- 2. Mean and SE per grid_size x density x quadrant ----------------------
+quadrant_long_stats <- quadrant_long_raw %>%
+  group_by(grid_size, density, quadrant) %>%
+  summarise(
+    mean_val = mean(value, na.rm = TRUE),
+    se_val   = sd(value, na.rm = TRUE) / sqrt(sum(!is.na(value))),
+    .groups = "drop"
+  )
+
+quadrant_long_grids <- quadrant_long_raw %>%
+  group_by(grid_size, density, grid_key, quadrant) %>%
+  summarise(
+    value = mean(value, na.rm = TRUE),
+    se_val   = sd(value, na.rm = TRUE) / sqrt(sum(!is.na(value))),
+    .groups = "drop"
+  )
+
+# --- 3. Plot: bars + SE error bars + jittered raw points --------------------
+p5 <- ggplot(quadrant_long_stats, aes(x = quadrant, y = mean_val, fill = density)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean_val - se_val, ymax = mean_val + se_val),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_jitter(
+    data = quadrant_long_grids,
+    aes(x = quadrant, y = value, fill = density),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.2, shape = 16, show.legend = FALSE
+  ) +
+  facet_grid(~ grid_size) +
+  labs(
+    # title = "Quadrant Fraction by Grid Size and Density",
+    x = NULL,
+    y = "Fraction",
+    fill = "Density"
+  ) +
+  scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+  )
+
+p5
+ggsave(
+  file.path("figures", file_output, "quadrant.png"),
+  p5, width = 8, height = 5, dpi = 600
+)
+```
+
+```{r}
+quadrant_long <- traj_df %>%
+  mutate(
+    traj_uid = interaction(grid_key, trajectory_id, drop = TRUE),
+    quadrant_sum = quadrant_count_ul + quadrant_count_ur + quadrant_count_dl + quadrant_count_dr
+  ) %>%
+  pivot_longer(
+    cols = all_of(c("quadrant_count_ul", "quadrant_count_ur",
+                "quadrant_count_dl", "quadrant_count_dr")),
+    names_to = "quadrant",
+    names_prefix = "quadrant_count_",
+    values_to = "count"
+  ) %>%
+  mutate(quadrant = relevel(factor(quadrant), ref = "ur")) %>%
+  select(count, quadrant, grid_size, density, quadrant_sum, traj_uid, grid_key) %>%
+  filter(!quadrant_sum == 0) # Removing quadrant_sum == 0 so that log (0) is NA 
+
+quadrant_null <- glmer(count ~ offset(log(quadrant_sum))
+            + (quadrant | traj_uid)
+            + (1 | grid_key),
+            family = poisson, data = quadrant_long)
+
+quadrant_mdl1 <- glmer(count ~ density
+            + offset(log(quadrant_sum))
+            + (quadrant | traj_uid)
+            + (1 | grid_key),
+            family = poisson, data = quadrant_long)
+
+anova(quadrant_null, quadrant_mdl1)
+```
+
+```{r}
+summary(quadrant_mdl1)
+```
+
+
+
