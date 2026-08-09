@@ -45,15 +45,17 @@ Do not commit this file — it is already in `.gitignore`.
 
 ```
 ├── algorithms/                      # Subgoal inference algorithms (IRL-based)
-│   ├── run_algorithms.py            # Entry point — orchestrates all algorithms, plots, CSV
-│   ├── run_trex.py                  # T-REX reward learning entry point
-│   ├── visit_frequency.py           # Baseline: most-visited cell
+│   ├── run_algorithms.py            # Entry point — orchestrates the 5 default algorithms, plots, CSV
+│   ├── visit_frequency.py           # Baseline: pooled cell visit frequency
+│   ├── trajectory_visit_frequency.py # Baseline: per-trajectory (deduped) visit frequency
 │   ├── surprise_v2.py               # Surprise model (terminal-directed)
 │   ├── inv_planning.py              # Bayesian inverse planning
-│   ├── bnirl.py                     # BNIRL Gibbs sampler
-│   ├── birl_wrapper.py              # BIRL PolicyWalk MCMC
 │   ├── maxent_irl.py                # Maximum Causal Entropy IRL
-│   └── trex.py                      # T-REX neural reward learning (requires torch)
+│   └── archive/                     # Not in the default suite, kept for reference
+│       ├── run_trex.py              #   T-REX reward learning entry point
+│       ├── bnirl.py                 #   BNIRL Gibbs sampler
+│       ├── birl_wrapper.py          #   BIRL PolicyWalk MCMC
+│       └── trex.py                  #   T-REX neural reward learning (requires torch)
 ├── analysis/                        # Offline analysis scripts
 │   ├── metrics.py                   # Pure math: entropy, JSD, KL, calibration, stats
 │   ├── visualization.py             # Shared matplotlib helpers (paper-quality figures)
@@ -252,7 +254,7 @@ Token-level logprobs are stored per step for downstream mechanistic interpretabi
 
 ## Subgoal inference algorithms
 
-The `algorithms/` package infers which intermediate cell an agent was heading toward (before the terminal goal), given observed navigation trajectories and a grid layout. Six methods are implemented: visit frequency baseline, surprise model, Bayesian inverse planning, BNIRL, BIRL, and maximum causal entropy IRL. T-REX (neural reward learning) is also included and requires PyTorch.
+The `algorithms/` package infers which intermediate cell an agent was heading toward (before the terminal goal), given observed navigation trajectories and a grid layout. Five methods run by default: two visit-frequency baselines (pooled cell-level and per-trajectory), surprise model, Bayesian inverse planning, and maximum causal entropy IRL. BNIRL, BIRL, and T-REX (neural reward learning, requires PyTorch) remain available under `algorithms/archive/` but are excluded from the default suite.
 
 ```bash
 python algorithms/run_algorithms.py <data_dir> [--mode {individual,pooled,both}]
@@ -262,7 +264,7 @@ Pass `--skip-invalid-actions` to either entry point to discard wall-collision st
 
 ```bash
 python algorithms/run_algorithms.py <data_dir> --skip-invalid-actions
-python algorithms/run_trex.py <data_dir> --skip-invalid-actions
+python algorithms/archive/run_trex.py <data_dir> --skip-invalid-actions
 ```
 
 See [`algorithms/algorithms.md`](algorithms/algorithms.md) for full documentation, input format, and output schema. The algorithms are compatible with output from `get_multiple_trajectories_coin_env`.
@@ -378,7 +380,7 @@ Both scripts accept `--multi-model` to process multiple model subdirectories in 
 
 Each run produces:
 - **Per-grid CSV** — one row per (grid × effort) combination with all metrics including entropy/JSD/ECE
-- **Per-trajectory CSV** (`coin_per_trajectory_*.csv`) — one row per individual trajectory with all independently computable metrics (excludes entropy/JSD/ECE)
+- **Per-trajectory CSV** (`coin_per_trajectory.csv`) — one row per individual trajectory with all independently computable metrics (excludes entropy/JSD/ECE)
 - Size×density summary CSV, distance summary CSV, overall summary JSON
 - Figures (PNG + PDF) under `analysis/outputs/<run_name>/`
 

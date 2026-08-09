@@ -4,19 +4,26 @@ Seven algorithms in `algorithms/` for inferring the latent subgoal (coin positio
 observed gridworld navigation trajectories. All share the same output format:
 `score_grid[row_from_top, col]` + `predicted_json_coords (col, row_from_top)`.
 
+> **Note:** the default `run_algorithms.py` suite now runs 5 of these
+> (Visit Frequency — split into `visit_frequency.py` cell-level and
+> `trajectory_visit_frequency.py` trajectory-level baselines — Surprise v2,
+> Inverse Planning, MaxEnt IRL). BNIRL, BIRL, and T-REX (sections 4, 5, 7
+> below) have moved to `algorithms/archive/` and are excluded from the
+> default suite, but remain directly importable. See `algorithms.md`.
+
 ---
 
 ## Broad Classification
 
 | Algorithm | File | Family |
 |---|---|---|
-| Visit Frequency | `visit_frequency.py` | Non-parametric baseline |
+| Visit Frequency | `visit_frequency.py` / `trajectory_visit_frequency.py` | Non-parametric baseline |
 | Surprise v2 | `surprise_v2.py` | Information-theoretic (non-Bayesian) |
 | Inverse Planning | `inv_planning.py` | Bayesian IRL / ToM |
-| BNIRL | `bnirl.py` | Bayesian non-parametric IRL |
-| BIRL | `birl_wrapper.py` | Bayesian IRL (MCMC) |
+| BNIRL | `archive/bnirl.py` | Bayesian non-parametric IRL |
+| BIRL | `archive/birl_wrapper.py` | Bayesian IRL (MCMC) |
 | MaxEnt IRL | `maxent_irl.py` | Maximum Entropy IRL |
-| T-REX | `trex.py` | Preference-based IRL (deep learning) |
+| T-REX | `archive/trex.py` | Preference-based IRL (deep learning) |
 
 ---
 

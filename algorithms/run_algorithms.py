@@ -5,11 +5,11 @@ Run 5 IRL algorithms on trajectory data and produce comparison plots.
 
 Algorithms
 ----------
-1. Surprise v2     — terminal-directed surprise model
-2. Inv. Planning   — Bayesian inverse planning (soft value iteration)
-3. BNIRL           — Fixed-K=2 Gibbs sampler
-4. BIRL            — PolicyWalk MCMC (Ramachandran & Amir 2007)
-5. MaxEnt IRL      — Maximum Causal Entropy IRL (Ziebart 2010)
+1. Cell Visit Freq       — pooled per-step visit counts
+2. Trajectory Visit Freq — distinct-trajectory visit counts (deduped per traj)
+3. Inv. Planning         — Bayesian inverse planning (soft value iteration)
+4. MaxEnt IRL            — Maximum Causal Entropy IRL (Ziebart 2010)
+5. Surprise v2           — terminal-directed surprise model
 
 Usage
 -----
@@ -50,31 +50,28 @@ _ALGO_DIR = Path(__file__).resolve().parent
 if str(_ALGO_DIR) not in sys.path:
     sys.path.insert(0, str(_ALGO_DIR))
 
-from visit_frequency import run_visit_freq
-from surprise_v2     import run_surprise_v2
-from inv_planning    import run_inv_planning
-from bnirl           import run_bnirl
-from birl_wrapper    import run_birl
-from maxent_irl      import run_maxent
+from visit_frequency            import run_visit_freq
+from trajectory_visit_frequency import run_trajectory_visit_freq
+from surprise_v2                import run_surprise_v2
+from inv_planning               import run_inv_planning
+from maxent_irl                 import run_maxent
 
 ALGORITHMS = [
-    ("Visit Freq",    run_visit_freq),
-    ("Surprise v2",   run_surprise_v2),
-    ("Inv. Planning", run_inv_planning),
-    ("BNIRL",         run_bnirl),
-    ("BIRL",          run_birl),
-    ("MaxEnt IRL",    run_maxent),
+    ("Cell Visit Freq",       run_visit_freq),
+    ("Trajectory Visit Freq", run_trajectory_visit_freq),
+    ("Inv. Planning",         run_inv_planning),
+    ("MaxEnt IRL",            run_maxent),
+    ("Surprise v2",           run_surprise_v2),
 ]
 
-_ALGO_COLORS = ["#8C8C8C", "#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B2"]
+_ALGO_COLORS = ["#8C8C8C", "#64B5CD", "#DD8452", "#8172B2", "#4C72B0"]
 
 _ALGO_SCORE_TYPES = {
-    "Visit Freq":    "visits",
-    "Surprise v2":   "surprise",
-    "Inv. Planning": "posterior",
-    "BNIRL":         "samples",
-    "BIRL":          "reward",
-    "MaxEnt IRL":    "reward",
+    "Cell Visit Freq":       "visits",
+    "Trajectory Visit Freq": "traj_visits",
+    "Inv. Planning":         "posterior",
+    "MaxEnt IRL":            "reward",
+    "Surprise v2":           "surprise",
 }
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -122,28 +119,75 @@ def is_successful(steps, layout):
     return tuple(layout["goal_pos"]) in path
 
 
-def load_grid(data_dir, grid_id, effort="low", skip_invalid_actions: bool = False):
-    """Load layout and all successful trajectory paths for one grid."""
+def _grid_key(layout_filename: str):
+    """Unique grid identifier: the filename prefix before '_coin_layout.json'.
+
+    Bare grid_id numbers (e.g. "grid0") are not unique within a directory that
+    contains multiple config variants (e.g. several grid_complexity values) —
+    each variant re-uses grid_id 0..N-1, so the full prefix is the only safe key.
+    """
+    m = re.match(r"(.+)_coin_layout\.json$", layout_filename)
+    return m.group(1) if m else None
+
+
+def _grid_label(grid_key: str) -> str:
+    """Short display label for a grid_key, e.g. 'comp0.0_grid0'.
+
+    Falls back to the full grid_key if that suffix pattern isn't present, so
+    this stays generic for other naming schemes.
+    """
+    m = re.search(r"(comp[\d.]+_grid\d+)$", grid_key)
+    return m.group(1) if m else grid_key
+
+
+def load_grid(data_dir, grid_key, effort="low", skip_invalid_actions: bool = False):
+    """Load layout and all successful trajectory paths for one grid.
+
+    grid_key must be the exact unique prefix returned by _grid_key() — not a
+    bare grid_id number, which can collide across config variants sharing a
+    directory (see _grid_key docstring).
+    """
     data_dir = Path(data_dir)
-    layout_files = list(data_dir.glob(f"*_grid{grid_id}_coin_layout.json"))
+    layout_files = list(data_dir.glob(f"{grid_key}_coin_layout.json"))
     if not layout_files:
-        raise FileNotFoundError(f"No layout file for grid {grid_id} in {data_dir}")
+        raise FileNotFoundError(f"No layout file for grid {grid_key} in {data_dir}")
     with open(layout_files[0]) as f:
         layout = json.load(f)
 
-    traj_files = sorted(data_dir.glob(f"*_grid{grid_id}_coin_{effort}_traj*.json"))
+    traj_files = sorted(data_dir.glob(f"{grid_key}_coin_{effort}_traj*.json"))
     successful_paths, traj_ids = [], []
     for tf in traj_files:
         m = re.search(r"_traj(\d+)\.json$", tf.name)
         traj_id = int(m.group(1)) if m else -1
         with open(tf) as f:
-            data = json.load(f)
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError as e:
+                print(f"  WARNING: corrupted trajectory file {tf.name} ({e}) — skipping")
+                continue
         steps = data.get("steps", [])
         if is_successful(steps, layout):
-            successful_paths.append(build_path(steps, skip_invalid_actions=skip_invalid_actions))
+            path = build_path(steps, skip_invalid_actions=skip_invalid_actions)
+            if _path_visits_wall(path, layout["grid_layout"]):
+                print(f"  WARNING: {tf.name} visits a wall cell relative to its paired "
+                      f"layout (mismatched grid data?) — skipping")
+                continue
+            successful_paths.append(path)
             traj_ids.append(traj_id)
 
     return layout, successful_paths, traj_ids
+
+
+def _path_visits_wall(path, grid_layout):
+    """True if any (col, row_top) position in path is out of bounds or a wall
+    cell in grid_layout — a sign the trajectory and layout describe different
+    grids (mismatched/misfiled data), since a real agent can never occupy a
+    wall cell."""
+    n_rows, n_cols = len(grid_layout), len(grid_layout[0])
+    for col, row in path:
+        if not (0 <= row < n_rows and 0 <= col < n_cols) or grid_layout[row][col] == "#":
+            return True
+    return False
 
 
 # ── Plotting helpers ──────────────────────────────────────────────────────────
@@ -204,18 +248,19 @@ def _grid_to_json(score):
 
 # ── Per-grid processing ───────────────────────────────────────────────────────
 
-def run_grid(data_dir, grid_id, plots_dir, mode="both", effort="low", skip_invalid_actions: bool = False):
+def run_grid(data_dir, grid_key, plots_dir, mode="both", effort="low", skip_invalid_actions: bool = False):
     """Run all algorithms on one grid, save plots, return (results, csv_rows)."""
-    layout, paths, traj_ids = load_grid(data_dir, grid_id, effort=effort, skip_invalid_actions=skip_invalid_actions)
+    layout, paths, traj_ids = load_grid(data_dir, grid_key, effort=effort, skip_invalid_actions=skip_invalid_actions)
+    label = _grid_label(grid_key)
 
     if not paths:
-        print(f"  Grid {grid_id}: no successful trajectories — skipping")
+        print(f"  Grid {label}: no successful trajectories — skipping")
         return None
 
     coin_j = tuple(layout["coin_pos"])
     n = len(paths)
     n_algos = len(ALGORITHMS)
-    print(f"  Grid {grid_id}: {n} successful trajectories  (coin={coin_j})")
+    print(f"  Grid {label}: {n} successful trajectories  (coin={coin_j})")
 
     results = {name: {"individual": [], "aggregated": None} for name, _ in ALGORITHMS}
     csv_rows = []
@@ -242,7 +287,7 @@ def run_grid(data_dir, grid_id, plots_dir, mode="both", effort="low", skip_inval
                 plot_result(axes[row, col], score, layout, pred, f"d = {dist}")
                 print(f"d={dist}")
                 csv_rows.append({
-                    "grid_id": grid_id,
+                    "grid_id": label,
                     "traj_id": tid,
                     "mode_type": "individual",
                     "algorithm": name,
@@ -258,11 +303,11 @@ def run_grid(data_dir, grid_id, plots_dir, mode="both", effort="low", skip_inval
                                     rotation=0, labelpad=24, va="center")
 
         fig.suptitle(
-            f"Grid {grid_id} — Individual ({n} successful, coin={coin_j})",
+            f"Grid {label} — Individual ({n} successful, coin={coin_j})",
             fontsize=10, y=1.0,
         )
         fig.tight_layout()
-        out = plots_dir / f"grid{grid_id}_individual.png"
+        out = plots_dir / f"{label}_individual.png"
         fig.savefig(out, dpi=130, bbox_inches="tight")
         plt.close(fig)
         print(f"    → Saved {out.name}")
@@ -281,7 +326,7 @@ def run_grid(data_dir, grid_id, plots_dir, mode="both", effort="low", skip_inval
             plot_result(axes[0, col], score, layout, pred, f"{name}\nd = {dist}")
             print(f"d={dist}")
             csv_rows.append({
-                "grid_id": grid_id,
+                "grid_id": label,
                 "traj_id": "AGG",
                 "mode_type": "pooled",
                 "algorithm": name,
@@ -295,11 +340,11 @@ def run_grid(data_dir, grid_id, plots_dir, mode="both", effort="low", skip_inval
             })
 
         fig.suptitle(
-            f"Grid {grid_id} — Aggregated ({n} trajectories, coin={coin_j})",
+            f"Grid {label} — Aggregated ({n} trajectories, coin={coin_j})",
             fontsize=10,
         )
         fig.tight_layout()
-        out = plots_dir / f"grid{grid_id}_aggregated.png"
+        out = plots_dir / f"{label}_aggregated.png"
         fig.savefig(out, dpi=130, bbox_inches="tight")
         plt.close(fig)
         print(f"    → Saved {out.name}")
@@ -410,28 +455,27 @@ def main(data_dir, mode="both", effort="low", skip_invalid_actions: bool = False
     plots_dir.mkdir(exist_ok=True)
 
     layout_files = sorted(data_dir.glob("*_coin_layout.json"))
-    grid_ids = sorted({
-        int(m.group(1))
-        for lf in layout_files
-        for m in [re.search(r"_grid(\d+)_coin_layout", lf.name)]
-        if m
+    grid_keys = sorted({
+        gk for lf in layout_files
+        for gk in [_grid_key(lf.name)]
+        if gk
     })
 
-    if not grid_ids:
+    if not grid_keys:
         print(f"No layout files found in {data_dir}")
         return
 
-    print(f"Found {len(grid_ids)} grid(s): {grid_ids}")
+    print(f"Found {len(grid_keys)} grid(s): {[_grid_label(gk) for gk in grid_keys]}")
     print(f"Output directory: {plots_dir}")
     print(f"Mode: {mode}  |  Effort: {effort}\n")
 
     all_results = {}
     all_csv_rows = []
-    for gid in grid_ids:
-        result = run_grid(data_dir, gid, plots_dir, mode=mode, effort=effort, skip_invalid_actions=skip_invalid_actions)
+    for gk in grid_keys:
+        result = run_grid(data_dir, gk, plots_dir, mode=mode, effort=effort, skip_invalid_actions=skip_invalid_actions)
         if result is not None:
             res, rows = result
-            all_results[gid] = res
+            all_results[_grid_label(gk)] = res
             all_csv_rows.extend(rows)
         print()
 
@@ -489,5 +533,11 @@ if __name__ == "__main__":
         default="low",
         help="Reasoning effort level of the trajectories to load (default: low)",
     )
+    parser.add_argument(
+        "--skip-invalid-actions",
+        action="store_true",
+        help="Discard wall-bump steps (zero position change) when loading trajectories",
+    )
     args = parser.parse_args()
-    main(args.data_dir, mode=args.mode, effort=args.effort)
+    main(args.data_dir, mode=args.mode, effort=args.effort,
+         skip_invalid_actions=args.skip_invalid_actions)
