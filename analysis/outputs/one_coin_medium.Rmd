@@ -253,7 +253,7 @@ p1_1 <- ggplot(detour_skip,
   ) +
   labs(
     x = "Coin detour distance",
-    y = "Proportion reaching terminal without coin",
+    y = "Proportion reaching \n terminal cell without coin",
     colour = "Model", fill = "Model"
   ) +
   theme_bw() +
@@ -266,7 +266,7 @@ p1_1
 
 ggsave(
   file.path("figures", file_output, "detour_plot.png"),
-  p1_1, width = 6, height = 4, dpi = 600
+  p1_1, width = 6, height = 3, dpi = 600
 )
 ```
 
@@ -504,7 +504,8 @@ accuracy_mdl1 <- lmer(
   control= lmerControl(optimizer='bobyqa')
 )
 summary(accuracy_mdl1)
-model_parameters(accuracy_mdl1, ci_method = "kr")
+
+parameters::model_parameters(accuracy_mdl1, ci_method = "kr")
 ```
 
 
@@ -519,23 +520,50 @@ model_parameters(accuracy_mdl2, ci_method="kr")
 ```
 
 ```{r}
-entropy_mdl1 <- lm(
-  mean_entropy ~ grid_size + density  + coin_detour_distance  + start_to_goal_via_coin_distance,
-  data = grid_df
+entropy_mdl1 <- grid_df %>%
+  mutate(reasoning_effort = relevel(factor(reasoning_effort), ref = "random")) %>%
+  lm(
+    mean_entropy ~ reasoning_effort + grid_size + density,
+    data = .
+  )
+
+model_parameters(entropy_mdl1)
+```
+
+```{r}
+entropy_mdl2 <- lm(
+  mean_entropy ~ reasoning_effort + grid_size + density  + coin_detour_distance  + start_to_goal_via_coin_distance,
+  data = filter(grid_df, reasoning_effort != "random")
 )
 
-summary(entropy_mdl1)
+model_parameters(entropy_mdl2)
+```
+
+```{r}
+confint(entropy_mdl2)
 ```
 
 
 ```{r}
-jsd_mdl1 <- lm(
-  mean_jsd ~ grid_size + density  + coin_detour_distance  + start_to_goal_via_coin_distance,
-  data = grid_df
+jsd_mdl1 <- grid_df %>%
+  mutate(reasoning_effort = relevel(factor(reasoning_effort), ref = "random")) %>%
+  lm(
+    mean_jsd ~ reasoning_effort + grid_size + density,
+    data = .
+  )
+
+model_parameters(jsd_mdl1)
+```
+
+```{r}
+jsd_mdl2 <- lm(
+  mean_jsd ~ reasoning_effort + grid_size + density  + coin_detour_distance  + start_to_goal_via_coin_distance,
+  data = filter(grid_df, reasoning_effort != "random")
 )
 
-summary(jsd_mdl1)
+model_parameters(jsd_mdl2)
 ```
+
 
 SPL 
 
@@ -621,7 +649,8 @@ model_parameters(spl_mdl1, ci_method="kr")
 ```{r}
 # --- 1. Reshape action counts to long format ---------------------------------
 actions_long_raw <- traj_df %>%
-  select(grid_size, density,
+  # filter(coin_and_goal == 1) %>%
+  select(reasoning_effort, grid_size, density,
          num_actions_up, num_actions_down, num_actions_left, num_actions_right) %>%
   pivot_longer(
     cols = starts_with("num_actions_"),
@@ -634,9 +663,9 @@ actions_long_raw <- traj_df %>%
                      labels = c("Up", "Down", "Left", "Right"))
   )
 
-# --- 2. Mean and SE per grid_size x density x action -------------------------
+# --- 2. Mean and SE per reasoning_effort x grid_size x density x action -------------------------
 actions_long_stats <- actions_long_raw %>%
-  group_by(grid_size, density, action) %>%
+  group_by(reasoning_effort, grid_size, density, action) %>%
   summarise(
     mean_count = mean(count, na.rm = TRUE),
     se_count   = sd(count, na.rm = TRUE) / sqrt(sum(!is.na(count))),
@@ -658,7 +687,7 @@ p4 <- ggplot(actions_long_stats, aes(x = action, y = mean_count, fill = density)
     position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
     size = 0.8, alpha = 0.015, shape = 16, show.legend = FALSE
   ) +
-  facet_wrap(~ grid_size) +
+  facet_grid(reasoning_effort ~ grid_size) +
   labs(
     # title = "Mean Cardinal Action Counts by Grid Size and Density",
     x = NULL,
@@ -675,8 +704,8 @@ p4 <- ggplot(actions_long_stats, aes(x = action, y = mean_count, fill = density)
 
 p4
 ggsave(
-  file.path("figures", file_output, "action.png"),
-  p4, width = 8, height = 5, dpi = 600
+  file.path("figures", file_output, "action1.png"),
+  p4, width = 8, height = 8, dpi = 600
 )
 ```
 
@@ -730,6 +759,71 @@ ggplot(actions_prop_stats, aes(x = density, y = mean_prop, fill = action)) +
 ```
 
 ```{r}
+# --- 1. Reshape action counts to long format ---------------------------------
+actions_long_raw <- traj_df %>%
+  select(reasoning_effort, grid_size,
+         num_actions_up, num_actions_down, num_actions_left, num_actions_right) %>%
+  pivot_longer(
+    cols = starts_with("num_actions_"),
+    names_to = "action",
+    names_prefix = "num_actions_",
+    values_to = "count"
+  ) %>%
+  mutate(
+    grid_size = factor(grid_size),
+    action = factor(action, levels = c("up", "down", "left", "right"),
+                    labels = c("Up", "Down", "Left", "Right")),
+    reasoning_effort = factor(reasoning_effort,
+                              levels = c("low", "medium", "random"),
+                              labels = c("Low", "Medium", "Random"))
+  )
+
+# --- 2. Mean and SE per model x grid_size x action ---------------------------
+actions_long_stats <- actions_long_raw %>%
+  group_by(reasoning_effort, grid_size, action) %>%
+  summarise(
+    mean_count = mean(count, na.rm = TRUE),
+    se_count   = sd(count, na.rm = TRUE) / sqrt(sum(!is.na(count))),
+    .groups = "drop"
+  )
+
+# --- 3. Plot -----------------------------------------------------------------
+p4_1 <- ggplot(actions_long_stats,
+               aes(x = reasoning_effort, y = mean_count, fill = action)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean_count - se_count, ymax = mean_count + se_count),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_jitter(
+    data = actions_long_raw,
+    aes(x = reasoning_effort, y = count, fill = action),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.005, shape = 16, show.legend = FALSE
+  ) +
+  facet_wrap(~ grid_size) +
+  coord_cartesian(ylim = c(0, 40)) +
+  scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  labs(x = "Model", y = "Count", fill = "Action direction") +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+
+p4_1
+
+ggsave(
+  file.path("figures", file_output, "action2.png"),
+  p4_1, width = 8, height = 4, dpi = 600
+)
+```
+
+
+```{r}
 direction_long <- traj_df %>%
   mutate(
     traj_uid = interaction(grid_key, trajectory_id, drop = TRUE)
@@ -741,26 +835,34 @@ direction_long <- traj_df %>%
     names_prefix = "num_actions_",
     values_to = "count"
   ) %>%
-  mutate(direction = factor(direction)) %>%
-  select(count, direction, grid_size, density, trajectory_length, traj_uid, grid_key)
+  mutate(
+    direction = factor(direction),
+    reasoning_effort = relevel(factor(reasoning_effort), ref = "random")
+    ) %>%
+  select(reasoning_effort, count, direction, grid_size, density, trajectory_length, traj_uid, grid_key)
 
 
 action_null <- glmer(count ~ offset(log(trajectory_length))
-            + (direction | traj_uid)
-            + (1 | grid_key),
-            family = poisson, data = direction_long)
+            + (direction | grid_key),
+            family = poisson, data = filter(direction_long, !reasoning_effort %in% c("random", "medium")))
 
 action_mdl1 <- glmer(count ~ direction
             + offset(log(trajectory_length))
-            + (direction | traj_uid)
-            + (1 | grid_key),
-            family = poisson, data = direction_long)
+            + (direction | grid_key),
+            family = poisson, data = filter(direction_long, !reasoning_effort %in% c("random", "medium")))
 
 anova(action_null, action_mdl1)
+
+model_parameters(action_mdl1)
 ```
 
 ```{r}
-summary(action_mdl1)
+action_mdl2 <- glmer(count ~ direction * reasoning_effort
+            + offset(log(trajectory_length))
+            + (direction | grid_key),
+            family = poisson, data = direction_long)
+
+model_parameters(action_mdl2)
 ```
 
 ## Quadrant 
@@ -770,6 +872,7 @@ Note: proportions excluding midline
 ```{r}
 # --- 1. Reshape to long format, keeping every raw row (for jitter) ----------
 quadrant_long_raw <- traj_df %>%
+  filter(reasoning_effort == "medium") %>%
   mutate(
     grid_size = factor(grid_size),
     density   = factor(density)
@@ -839,10 +942,84 @@ p5 <- ggplot(quadrant_long_stats, aes(x = quadrant, y = mean_val, fill = density
 
 p5
 ggsave(
-  file.path("figures", file_output, "quadrant.png"),
+  file.path("figures", file_output, "quadrant1.png"),
   p5, width = 8, height = 5, dpi = 600
 )
 ```
+
+```{r}
+# --- 1. Reshape to long format, keeping every raw row (for jitter) ----------
+quadrant_long_raw <- traj_df %>%
+  mutate(
+    grid_size = factor(grid_size),
+    reasoning_effort = factor(reasoning_effort,
+                              levels = c("low", "medium", "random"),
+                              labels = c("Low", "Medium", "Random"))
+  ) %>%
+  select(grid_size, reasoning_effort, grid_key,
+         quadrant_fraction_ul, quadrant_fraction_ur,
+         quadrant_fraction_dl, quadrant_fraction_dr) %>%
+  pivot_longer(
+    cols = starts_with("quadrant_fraction_"),
+    names_to = "quadrant",
+    names_prefix = "quadrant_fraction_",
+    values_to = "value"
+  ) %>%
+  mutate(
+    quadrant = factor(quadrant,
+                      levels = c("ul", "ur", "dl", "dr"),
+                      labels = c("Upper Left", "Upper Right",
+                                 "Lower Left", "Lower Right"))
+  )
+
+# --- 2. Mean and SE per model x grid_size x quadrant ------------------------
+quadrant_long_stats <- quadrant_long_raw %>%
+  group_by(grid_size, reasoning_effort, quadrant) %>%
+  summarise(
+    mean_val = mean(value, na.rm = TRUE),
+    se_val   = sd(value, na.rm = TRUE) / sqrt(sum(!is.na(value))),
+    .groups = "drop"
+  )
+
+# --- 3. Per-grid means for the jittered points ------------------------------
+quadrant_long_grids <- quadrant_long_raw %>%
+  group_by(grid_size, reasoning_effort, grid_key, quadrant) %>%
+  summarise(value = mean(value, na.rm = TRUE), .groups = "drop")
+
+# --- 4. Plot ----------------------------------------------------------------
+p5_1 <- ggplot(quadrant_long_stats,
+               aes(x = reasoning_effort, y = mean_val, fill = quadrant)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean_val - se_val, ymax = mean_val + se_val),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_jitter(
+    data = quadrant_long_grids,
+    aes(x = reasoning_effort, y = value, fill = quadrant),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.05, shape = 16, show.legend = FALSE
+  ) +
+  facet_wrap(~ grid_size) +
+  scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
+  labs(x = "Model", y = "Proportion", fill = "Quadrant") +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+
+p5_1
+
+ggsave(
+  file.path("figures", file_output, "quadrant2.png"),
+  p5_1, width = 8, height = 4, dpi = 600
+)
+```
+
 
 ```{r}
 quadrant_long <- traj_df %>%
@@ -857,26 +1034,38 @@ quadrant_long <- traj_df %>%
     names_prefix = "quadrant_count_",
     values_to = "count"
   ) %>%
-  mutate(quadrant = relevel(factor(quadrant), ref = "ur")) %>%
-  select(count, quadrant, grid_size, density, quadrant_sum, traj_uid, grid_key) %>%
+  mutate(
+    quadrant = relevel(factor(quadrant), ref = "ur"),
+    reasoning_effort = relevel(factor(reasoning_effort), ref = "random"),
+    has_coin = quadrant == coin_quadrant,
+    has_terminal = quadrant == terminal_quadrant
+    ) %>%
+  select(reasoning_effort, count, quadrant, grid_size, density, quadrant_sum, traj_uid, grid_key, coin_quadrant, has_coin, terminal_quadrant, has_terminal) %>%
   filter(!quadrant_sum == 0) # Removing quadrant_sum == 0 so that log (0) is NA 
-
-quadrant_null <- glmer(count ~ offset(log(quadrant_sum))
-            + (quadrant | traj_uid)
-            + (1 | grid_key),
-            family = poisson, data = quadrant_long)
-
-quadrant_mdl1 <- glmer(count ~ quadrant
-            + offset(log(quadrant_sum))
-            + (quadrant | traj_uid)
-            + (1 | grid_key),
-            family = poisson, data = quadrant_long)
-
-anova(quadrant_null, quadrant_mdl1)
 ```
 
 ```{r}
-summary(quadrant_mdl1)
+quadrant_null <- glmer(count ~ offset(log(quadrant_sum)) 
+                       + has_coin + has_terminal
+                       + (quadrant | grid_key),
+                       family = poisson, data = filter(quadrant_long, reasoning_effort == "low"))
+
+quadrant_mdl1 <- glmer(count ~ quadrant
+                       + has_coin + has_terminal
+                       + offset(log(quadrant_sum))
+                       + (quadrant | grid_key),
+                       family = poisson, data = filter(quadrant_long, reasoning_effort == "low"))
+
+anova(quadrant_null, quadrant_mdl1)
+model_parameters(quadrant_mdl1)
+```
+
+```{r}
+quadrant_mdl2 <- glmer(count ~ reasoning_effort * quadrant + has_coin + has_terminal
+            + offset(log(quadrant_sum))
+            + (quadrant | grid_key),
+            family = poisson, data = quadrant_long)
+model_parameters(quadrant_mdl2)
 ```
 
 

@@ -90,8 +90,8 @@ Subsetting data for this specific round of analyses
 
 ```{r}
 traj_df <- full_data %>% 
-  filter(!trajectory_category %in% c("random_starts","reshuffled_walls"), 
-         !(model == "fine_tuned" & reasoning_effort == "medium")) %>%
+  filter(!trajectory_category %in% c("random_starts","reshuffled_walls"),
+         !(group == "avoid" & model == "fine_tuned")) %>%
   mutate( # Ordering factors for mdl fitting 
     trajectory_category = fct_relevel(trajectory_category, "base"),
     grid_size = factor(grid_size,
@@ -108,7 +108,8 @@ traj_df <- full_data %>%
   )
 
 grid_df <- full_data_grid %>%
-  filter(!trajectory_category %in% c("random_starts","reshuffled_walls"), !model == "fine_tuned") %>%
+  filter(!trajectory_category %in% c("random_starts","reshuffled_walls"),
+         !(group == "avoid" & model == "fine_tuned")) %>%
   mutate( # Ordering factors for mdl fitting 
     trajectory_category = fct_relevel(trajectory_category, "base"),
     grid_size = factor(grid_size,
@@ -236,35 +237,50 @@ p1
 ```
 
 ```{r}
+group_levels <- c("control", "control_medium",
+                  "control_fine_tuned", "control_medium_fine_tuned",
+                  "deceptive", "random",
+                  "avoid", "avoid_medium")
+
+group_labels <- c("Collect - low reasoning", "Collect - medium reasoning",
+                  "Collect fine-tuned - low reasoning", "Collect fine-tuned - medium reasoning",
+                  "Deceptive - low reasoning", "Baseline - random agent",
+                  "Avoid - low reasoning", "Avoid - medium reasoning")
+
+group_colours <- c("#2c6fb0", "#7aa8d4",   # collect, dark → light
+                   "#1b7f5f", "#7cc0a4",   # collect fine-tuned, dark → light
+                   "#7E4794",              # deceptive
+                   "#b0b0b0",              # random
+                   "#c0392b", "#e08079")   # avoid, dark → light
+
 grid_success_summary <- traj_df %>%
   group_by(group) %>%
   summarise(
     mean_goal = mean(goal_only),
-    se_goal = sd(goal_only)/sqrt(n()),
+    se_goal   = sd(goal_only) / sqrt(n()),
     mean_coin = mean(coin_only),
-    se_coin = sd(coin_only)/sqrt(n()),
+    se_coin   = sd(coin_only) / sqrt(n()),
     mean_both = mean(coin_and_goal),
-    se_both = sd(coin_and_goal)/sqrt(n())
+    se_both   = sd(coin_and_goal) / sqrt(n()),
+    .groups = "drop"
   ) %>%
   pivot_longer(
-    cols = -c(group),
+    cols = -group,
     names_to = c(".value", "metric"),
     names_pattern = "(mean|se)_(.*)"
   ) %>%
   mutate(
-    metric = factor(metric,
-                    levels = c("both", "coin", "goal")),
-    group = factor(group,
-                   levels = c("control", "control_medium", "control_fine_tuned", "deceptive",
-                              "random","avoid","avoid_medium", "avoid_fine_tuned"))
-    )
+    metric = factor(metric, levels = c("both", "coin", "goal")),
+    group  = factor(group, levels = group_levels)
+  )
 
 grid_success_raw <- traj_df %>%
   group_by(group, grid_key) %>%
   summarise(
     mean_goal = mean(goal_only),
     mean_coin = mean(coin_only),
-    mean_both = mean(coin_and_goal)
+    mean_both = mean(coin_and_goal),
+    .groups = "drop"
   ) %>%
   pivot_longer(
     cols = -c(group, grid_key),
@@ -272,11 +288,8 @@ grid_success_raw <- traj_df %>%
     names_pattern = "(mean|se)_(.*)"
   ) %>%
   mutate(
-    metric = factor(metric,
-                    levels = c("goal", "coin", "both")),
-    group = factor(group,
-                   levels = c("control", "control_medium", "control_fine_tuned", "deceptive",
-                              "random","avoid","avoid_medium", "avoid_fine_tuned"))
+    metric = factor(metric, levels = c("both", "coin", "goal")),
+    group  = factor(group, levels = group_levels)
   )
 
 p2 <- ggplot(grid_success_summary, aes(x = metric, y = mean, fill = group)) +
@@ -290,52 +303,33 @@ p2 <- ggplot(grid_success_summary, aes(x = metric, y = mean, fill = group)) +
   geom_jitter(
     data = grid_success_raw,
     aes(x = metric, y = mean, fill = group),
-    position = position_jitterdodge(jitter.width = 0.1, jitter.height = 0.005, dodge.width = 0.8),
+    position = position_jitterdodge(jitter.width = 0.1, jitter.height = 0.005,
+                                    dodge.width = 0.8),
     size = 0.8, alpha = 0.05, shape = 16, show.legend = FALSE
   ) +
-  # facet_grid(density~grid_size,
-  #            labeller = labeller(
-  #            density = function(x) paste0("Density: ", x))
-  #            ) +
   scale_x_discrete(
     limits = c("both", "coin", "goal"),
-    labels = c(both = "Coin and terminal", coin = "Coin only",  goal = "Terminal only")
+    labels = c(both = "Coin and terminal", coin = "Coin only", goal = "Terminal only")
   ) +
-  # scale_fill_manual(values = c("#3594cc", "#8cc5e3", "#ea801c", "#f0b077")) +
   scale_fill_manual(
-    # values = c("#c8c8c8", "#f0c571", "#59a89c", "#0b81a2",
-    #            "#e25759", "#9d2c00", "#7E4794", "#36b700"),
-    values = c("#2c6fb0", "#7aa8d4", "#c3d7ec",   # control family, dark→light
-               "#7E4794",                          # deceptive
-               "#b0b0b0",                          # random
-               "#c0392b", "#e08079", "#f2c7c3"),
-    limits = c("control", "control_medium", "control_fine_tuned", "deceptive",
-               "random","avoid","avoid_medium", "avoid_fine_tuned"),  
-    labels = c("Collect - low reasoning", "Collect - medium reasoning",
-               "Collect - fine tuned", "Deceptive - low reasoning", 
-               "Baseline - random agent", "Avoid - low reasoning", 
-               "Avoid - medium reasoning", "Avoid - fine tuned")  
+    values = group_colours,
+    limits = group_levels,
+    labels = group_labels
   ) +
-  labs(
-    # title = "Task Success by Grid Size and Density",
-    x = NULL,
-    y = "Task success",
-    fill = "Experimental condition"
-  ) +
+  labs(x = NULL, y = "Task success", fill = "Experimental condition") +
   theme_bw() +
   theme(
     legend.position = "right",
     panel.grid.major.x = element_blank(),
-    panel.grid.minor.x = element_blank(),
-    # axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    panel.grid.minor.x = element_blank()
   )
+
+p2
 
 ggsave(
   file.path("figures", file_output, "success_plot2.png"),
-  p2, width = 9, height = 4, dpi = 600
+  p2, width = 10, height = 4, dpi = 600
 )
-
-p2 
 ```
 
 ## Baseline: all groups vs. random 
@@ -375,15 +369,15 @@ summary(success_mdl2)
 ```{r}
 avoid_success_mdl1 <- traj_df %>%
   filter(group %in% c("random","avoid","avoid_medium")) %>%
-  mutate(group = relevel(factor(group), ref = "random")) %>%
+  mutate(reasoning_effort = relevel(factor(reasoning_effort), ref = "random")) %>%
   glmer(
-    goal_only ~ group + (1 | grid_key),
+    goal_only ~ reasoning_effort + grid_size + density + (1 | grid_key),
     data = .,
     family = binomial(),
     control = glmerControl(optimizer='bobyqa')
   )
 
-summary(avoid_success_mdl1)
+model_parameters(avoid_success_mdl1)
 ```
 
 ## Avoid: low vs medium
@@ -391,51 +385,204 @@ summary(avoid_success_mdl1)
 ```{r}
 avoid_success_mdl2 <- traj_df %>%
   filter(group %in% c("avoid","avoid_medium")) %>%
-  mutate(group = relevel(factor(group), ref = "avoid")) %>%
+  # mutate(group = relevel(factor(group), ref = "avoid")) %>%
   glmer(
-    goal_only ~ group + (1 | grid_key),
+    goal_only ~ reasoning_effort + grid_size + density + coin_detour_distance + start_to_goal_via_coin_distance + (1 | grid_key),
     data = .,
     family = binomial(),
     control = glmerControl(optimizer='bobyqa')
   )
 
-summary(avoid_success_mdl2)
+model_parameters(avoid_success_mdl2)
 ```
 
-## Baseline low vs avoid low 
+## Baseline vs avoid 
 
 ```{r}
 baseline_success <- traj_df %>%
   filter(group %in% c("control","control_medium")) %>%
   mutate(
-    group = ifelse(group == "control_medium", "control", "control")
+    group = "control"
   ) %>%
   rename(success = coin_and_goal) %>%
-  select(group, reasoning_effort, grid_key, success)
+  select(group, reasoning_effort, grid_key, success, grid_size, density, coin_detour_distance, start_to_goal_via_coin_distance)
   
 avoid_success <- traj_df %>%
   filter(group %in% c("avoid","avoid_medium")) %>%
   mutate(
-    group = ifelse(group == "avoid_medium", "avoid", "avoid")
+    group = "avoid",
+    grid_key = paste0(grid_key, "_avoid") # So that the collect and avoid grids have distinct names 
   ) %>%
   rename(success = goal_only) %>%
-  select(group, reasoning_effort, grid_key, success)
+  select(group, reasoning_effort, grid_key, success, grid_size, density, coin_detour_distance, start_to_goal_via_coin_distance)
 
-success_df <- rbind(baseline_success, avoid_success)
-
-compare_success_mdl1 <- success_df %>%
+success_df <- rbind(baseline_success, avoid_success) %>%
   mutate(
     group = relevel(factor(group), ref = "control"),
     reasoning_effort = relevel(factor(reasoning_effort), ref = "low")
-    ) %>%
-  glmer(
-    success ~ group + reasoning_effort + (1 | grid_key),
-    data = .,
+    ) 
+
+success_df %>%
+  group_by(group, reasoning_effort) %>%
+  summarise(
+    count = n()
+  )
+```
+
+```{r}
+compare_success_mdl1 <-glmer(success ~ group + reasoning_effort + grid_size + density +  (group | grid_key),
+                             data = success_df,
+                             family = binomial(),
+                             control = glmerControl(optimizer='bobyqa')
+                             )
+
+model_parameters(compare_success_mdl1)
+```
+
+# Fine-tuned 
+
+```{r}
+ft_df <- traj_df %>%
+  filter(group %in% c("random","control_fine_tuned", "control_medium_fine_tuned")) %>%
+  mutate(reasoning_effort = relevel(factor(reasoning_effort), ref = "random"))
+ft_df %>%
+  group_by(reasoning_effort) %>%
+  summarise(
+    n = n()
+  )
+```
+
+
+```{r}
+ft_mdl1 <- glmer(
+    coin_and_goal ~ reasoning_effort + grid_size + density + (1 | grid_key),
+    data = ft_df,
     family = binomial(),
     control = glmerControl(optimizer='bobyqa')
   )
 
-summary(compare_success_mdl1)
+model_parameters(ft_mdl1)
+```
+
+```{r}
+ft_comparison_df <- traj_df %>%
+  filter(group %in% c("control","control_medium",
+                      "control_fine_tuned", "control_medium_fine_tuned")) %>%
+  mutate(
+    group = if_else(grepl("fine_tuned", group), "fine_tuned", "baseline"),
+    group = relevel(factor(group), ref = "baseline"),
+  ) %>%
+  select(group, reasoning_effort, grid_key, coin_and_goal, goal_only, action_accuracy, grid_size, density, coin_detour_distance, start_to_goal_via_coin_distance)
+  
+ft_comparison_df %>%
+  group_by(group, reasoning_effort) %>%
+  summarise(
+    count = n()
+  )
+```
+
+```{r}
+compare_ft_mdl1 <-glmer(coin_and_goal ~ group + reasoning_effort + grid_size + density 
+                        + coin_detour_distance + start_to_goal_via_coin_distance 
+                        + (1 | grid_key),
+                             data = ft_comparison_df,
+                             family = binomial(),
+                             control = glmerControl(optimizer='bobyqa')
+                             )
+
+model_parameters(compare_ft_mdl1)
+```
+
+```{r}
+compare_ft_mdl2 <-glmer(goal_only ~ group + reasoning_effort + grid_size + density 
+                        + coin_detour_distance + start_to_goal_via_coin_distance 
+                        + (1 | grid_key),
+                             data = ft_comparison_df,
+                             family = binomial(),
+                             control = glmerControl(optimizer='bobyqa')
+                             )
+
+model_parameters(compare_ft_mdl2)
+```
+
+```{r}
+compare_ft_accuracy_mdl1 <-lmer(
+    action_accuracy ~ group + reasoning_effort + grid_size + density 
+                        + coin_detour_distance + start_to_goal_via_coin_distance 
+                        + (1 | grid_key),
+    data = ft_comparison_df,
+    control= lmerControl(optimizer='bobyqa')
+  )
+
+model_parameters(compare_ft_accuracy_mdl1, ci_method="kr")
+```
+
+# Deceptive
+
+```{r}
+deceptive_df <- traj_df %>%
+  filter(group %in% c("random","control", "deceptive")) %>%
+  mutate(
+    reasoning_effort = relevel(factor(reasoning_effort), ref = "random"),
+    group = relevel(factor(group), ref = "random")
+    )
+
+deceptive_df %>%
+  group_by(group, reasoning_effort) %>%
+  summarise(
+    n = n()
+  )
+```
+
+```{r}
+deceptive_mdl1 <- glmer(
+    coin_and_goal ~ group + grid_size + density + (1 | grid_key),
+    data = deceptive_df,
+    family = binomial(),
+    control = glmerControl(optimizer='bobyqa')
+  )
+
+model_parameters(deceptive_mdl1)
+```
+
+```{r}
+deceptive_df2 <- deceptive_df %>%
+  filter(group != "random") %>%
+  mutate(group = relevel(factor(group), ref = "control"))
+
+deceptive_mdl2 <- 
+  glmer(
+    coin_and_goal ~ group + grid_size + density + (1 | grid_key),
+    data = deceptive_df2,
+    family = binomial(),
+    control = glmerControl(optimizer='bobyqa')
+  )
+
+model_parameters(deceptive_mdl2)
+```
+
+```{r}
+deceptive_accuracy_mdl <- 
+  lmer(
+    action_accuracy ~ group + grid_size + density 
+    + coin_detour_distance + start_to_goal_via_coin_distance 
+    + (1 | grid_key),
+    data = deceptive_df2,
+    control= lmerControl(optimizer='bobyqa')
+  )
+
+model_parameters(deceptive_accuracy_mdl)
+```
+
+```{r}
+deceptive_entropy_mdl <- grid_df %>%
+  filter(group %in% c("control", "deceptive")) %>%
+  mutate(group = relevel(factor(group), ref = "control")) %>%
+  lm(mean_entropy ~ group + grid_size 
+     + density  + coin_detour_distance  + start_to_goal_via_coin_distance,
+     data = .)
+
+model_parameters(deceptive_entropy_mdl)
 ```
 
 # Action accuracy 

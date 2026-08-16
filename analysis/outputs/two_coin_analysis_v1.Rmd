@@ -5,6 +5,12 @@ output: html_document
 
 ```{r}
 library(tidyverse)
+library(lme4)
+library(ggthemes)
+library(mclogit)
+library(nnet)
+library(parameters)
+library(DirichletReg) 
 ```
 
 
@@ -83,28 +89,91 @@ summary_by_grid <- full_data %>%
     names_pattern = "(mean|se)_(.*)"
   )
 
-p1 <- ggplot() +
-  geom_col(data = summary, aes(x = metric, y = mean, fill = metric)) + 
-  
-  geom_errorbar(data = summary, aes(x = metric, fill = metric, y = mean, ymin = mean - se, ymax = mean + se), width = 0.3,position = position_dodge(width = 0.9)) +
-  
-   geom_jitter(data = summary_by_grid, aes(x = metric, y = mean, fill = metric), position = position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9), alpha = 0.2) +
-  
-  geom_col(position = "dodge") +
-  facet_grid(reasoning_effort ~ collect_mode, labeller = label_both) +
-  labs(x = NULL, y = "Task success", fill = "Isometric transformation") +
-  theme_light() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = "none")
+p1 <- ggplot(summary,
+             aes(x = metric, y = mean, fill = metric)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7, alpha = 0.8,
+           colour = "black", linewidth = 0.3) +
+  geom_errorbar(
+    aes(ymin = mean - se, ymax = mean + se),
+    position = position_dodge(width = 0.8),
+    width = 0.2
+  ) +
+  geom_point(
+    data = summary_by_grid,
+    aes(x = metric, y = mean, fill = metric),
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+    size = 0.8, alpha = 0.2, shape = 16, show.legend = FALSE
+  ) +
+  facet_grid(
+    reasoning_effort ~ collect_mode,
+    labeller = labeller(
+      reasoning_effort = c(low    = "Low reasoning",
+                           medium = "Medium reasoning"),
+      collect_mode     = c(collect_all = "Collect two coins",
+                           collect_one = "Collect one coin")
+    )
+  ) +
+  scale_x_discrete(
+    limits = c("goal_only",
+               "collect_one_and_no_goal",
+               "collect_two_and_no_goal",
+               "collect_one_and_reach_goal",
+               "collect_two_and_reach_goal"),
+    labels = c(goal_only = "Terminal only",
+               collect_one_and_no_goal = "One coin only",
+               collect_two_and_no_goal = "Two coins only",
+               collect_one_and_reach_goal = "One coin and terminal",
+               collect_two_and_reach_goal = "Two coins and terminal")
+  ) +
+  scale_fill_manual(
+    limits = c("goal_only",
+               "collect_one_and_no_goal",
+               "collect_two_and_no_goal",
+               "collect_one_and_reach_goal",
+               "collect_two_and_reach_goal"),
+    values = c("#8c8c8c", "#3594cc", "#8cc5e3", "#ea801c", "#f0b077")
+  ) +
+  labs(x = NULL, y = "Task success") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
 
 p1
 
-ggsave("figures/two_coin_comparison.png", p1, width = 10, height = 6, dpi = 600)
+ggsave("figures/two_coins/two_coin_success.png", p1, width = 10, height = 6, dpi = 600)
+```
+
+Statistical tests
+
+```{r}
+traj_df <- full_data %>%
+  mutate(
+    success = case_when(
+      collect_mode == "collect_all" ~ as.integer(collect_two_and_reach_goal == 1),
+      collect_mode == "collect_one" ~ as.integer(collect_one_and_reach_goal == 1)
+    )
+  )
+
+two_coin_mdl1 <- glmer(
+  success ~ collect_mode * reasoning_effort + grid_size + density + (1 | grid_key),
+  data = traj_df,
+  family = binomial(),
+  control=glmerControl(optimizer='bobyqa')
+)
+
+model_parameters(two_coin_mdl1)
 ```
 
 
 
 
+
+
+# Archive 
 
 ```{r}
 summary <- full_data %>%

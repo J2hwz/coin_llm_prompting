@@ -412,3 +412,8 @@ Each run produces:
 | `analysis/analysis_utils.py` | Trajectory data classes, text-grid Dijkstra, logprob parsing |
 | `analysis/full_obs_trajectory_analysis.py` | Metrics and plots for standard navigation trajectories |
 | `analysis/coin_trajectory_analysis.py` | Phase-aware metrics and plots for coin navigation trajectories |
+| `analysis/plot_condition_trajectories.py` | Renders one success + one failure trajectory per condition on matched grids |
+| `analysis/plot_grid_layouts.py` | Renders panel of one-coin grid layouts across sizes/densities, no trajectories |
+| `analysis/plot_grid_text_representation.py` | Side-by-side rendered maze and the LLM's text-grid prompt representation |
+| `algorithms/compare_conditions.py` | Cross-condition comparison of subgoal-inference algorithms using best-available (CV-tuned/default) results |
+| `algorithms/plot_grid_comparison.py` | Heatmap + per-algorithm prediction grids for one maze across conditions |

@@ -14,12 +14,22 @@ Method
 CV unit = grid (ground truth coin_pos is per-grid; both algorithms already
 pool all successful trajectories for one grid into a single prediction).
 Stratified k-fold by grid_size (7/9/11). Per fold:
-    fit    — grid-search the candidate minimizing mean Manhattan distance
-             over the training folds only.
+    fit     — grid-search the candidate minimizing mean Manhattan distance
+              over the training folds only.
     predict — apply that one fitted value (not re-searched) to the held-out
-              fold's grids.
-    score  — mean Manhattan distance on the held-out fold only.
+              fold's grids, recording the predicted coin cell (not just the
+              distance) for every held-out grid.
+    score   — mean Manhattan distance on the held-out fold only.
 Separately, fit on *all* usable grids for the final reported point estimate.
+Every grid appears in exactly one test fold, so the per-grid held-out
+predictions collected across all folds cover the whole dataset — this is
+what makes them comparable, row for row, to run_algorithms.py's results.csv
+(which instead applies the fixed literature-default parameter to every
+grid). See `results.csv` in --output-dir.
+
+Candidate grids are intentionally small (see *_CANDIDATES below) — each one
+still spans the plausible range and includes the literature default — so a
+full CV run stays fast.
 
 Usage
 -----
@@ -52,11 +62,18 @@ from surprise_v2 import run_surprise_v2, TAU, EPSILON
 
 
 # ── Candidate grids ──────────────────────────────────────────────────────────
+# Kept deliberately small (4 x 4 x 3 = 48 combos for surprise_v2, down from
+# 240; 4 for inv_planning, down from 6) so a full CV run finishes quickly.
+# beta, lambda, and gamma bracket the plausible range and include the
+# literature default exactly (beta=2; lambda=0.10; gamma~=2, vs. 2.14).
+# alpha does NOT include its literature default (1.84) exactly — the
+# nearest candidate is 2 — so CV here cannot confirm/reject that specific
+# value, only the coarser question of which integer alpha fits best.
 
-BETA_CANDIDATES = [0.5, 1, 2, 4, 8, 16]
-LAMBDA_CANDIDATES = [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5]
-GAMMA_CANDIDATES = [1, 2, 4, 6, 8, 10]
-ALPHA_CANDIDATES = [1.0, 1.5, 1.84, 2.5, 3.5]
+BETA_CANDIDATES = [1, 2, 4, 8]
+LAMBDA_CANDIDATES = [0.0, 0.1, 0.2, 0.4]
+GAMMA_CANDIDATES = [1, 2, 4, 8]
+ALPHA_CANDIDATES = [1, 2, 3]
 
 
 # ── Scoring ──────────────────────────────────────────────────────────────────
@@ -80,6 +97,27 @@ def score_surprise_v2(params3, layout, paths):
 def _score_one(args):
     score_fn, candidate, layout, paths = args
     return score_fn(candidate, layout, paths)
+
+
+# Full-detail counterparts of score_inv_planning / score_surprise_v2: used
+# only for the (small) held-out-fold predict step, where we want the actual
+# predicted cell and score grid, not just the distance.
+
+
+def predict_inv_planning(beta, layout, paths):
+    score, pred = run_inv_planning(paths, layout, beta=beta)
+    return score, pred, _manhattan(pred, tuple(layout["coin_pos"]))
+
+
+def predict_surprise_v2(params3, layout, paths):
+    lam, gam, alpha = params3
+    score, pred = run_surprise_v2(paths, layout, params=(lam, gam, alpha, TAU, EPSILON))
+    return score, pred, _manhattan(pred, tuple(layout["coin_pos"]))
+
+
+def _predict_one(args):
+    predict_fn, candidate, layout, paths = args
+    return predict_fn(candidate, layout, paths)
 
 
 # ── Data discovery ───────────────────────────────────────────────────────────
@@ -156,12 +194,33 @@ def grid_search(candidates, grids, score_fn, executor, indices=None):
     return means
 
 
-def predict_and_score(theta, grids, score_fn, executor, indices):
-    """Predict + score step: apply one already-chosen parameter value
-    (never re-searched) to the given grids; return mean Manhattan distance."""
-    tasks = [(score_fn, theta, grids[i]["layout"], grids[i]["paths"]) for i in indices]
-    scores = list(executor.map(_score_one, tasks, chunksize=4))
-    return float(np.mean(scores))
+def predict_and_collect(theta, grids, predict_fn, executor, indices):
+    """Predict step: apply one already-chosen parameter value (never
+    re-searched) to the given (held-out) grids, recording the predicted coin
+    cell and full score grid for each — not just the aggregate distance.
+
+    Returns (rows, mean_dist) where each row is a dict with the grid's
+    identity, the prediction, and the resulting Manhattan distance; mean_dist
+    is the held-out-fold summary statistic used for CV reporting.
+    """
+    tasks = [(predict_fn, theta, grids[i]["layout"], grids[i]["paths"]) for i in indices]
+    outputs = list(executor.map(_predict_one, tasks, chunksize=4))
+    rows = []
+    for i, (score_grid, pred, dist) in zip(indices, outputs):
+        g = grids[i]
+        rows.append(
+            {
+                "grid_key": g["grid_key"],
+                "label": g["label"],
+                "data_dir": g["data_dir"],
+                "coin_pos": tuple(g["layout"]["coin_pos"]),
+                "score_grid": score_grid,
+                "pred": pred,
+                "dist": dist,
+            }
+        )
+    mean_dist = float(np.mean([r["dist"] for r in rows])) if rows else float("nan")
+    return rows, mean_dist
 
 
 def _compute_theta_stability(fold_thetas, best_theta):
@@ -175,16 +234,23 @@ def _compute_theta_stability(fold_thetas, best_theta):
     }
 
 
-def cross_validate(candidates, grids, score_fn, executor, k=5, seed=42):
+def cross_validate(candidates, grids, score_fn, predict_fn, executor, k=5, seed=42):
     splits = stratified_kfold(grids, k=k, seed=seed)
 
     fold_results = []
+    held_out_rows = []  # per-grid predictions, pooled across all folds
     for fold_i, (train_idx, test_idx) in enumerate(splits):
         fit_ranked = grid_search(
             candidates, grids, score_fn, executor, indices=train_idx
         )
         theta_i, train_score = fit_ranked[0]
-        held_out_score = predict_and_score(theta_i, grids, score_fn, executor, test_idx)
+        rows, held_out_score = predict_and_collect(
+            theta_i, grids, predict_fn, executor, test_idx
+        )
+        for row in rows:
+            row["fold"] = fold_i
+            row["theta"] = theta_i
+        held_out_rows.extend(rows)
         fold_results.append(
             {
                 "fold": fold_i,
@@ -206,6 +272,7 @@ def cross_validate(candidates, grids, score_fn, executor, k=5, seed=42):
 
     return {
         "fold_results": fold_results,
+        "held_out_rows": held_out_rows,
         "held_out_mean": float(np.mean(held)),
         "held_out_std": float(np.std(held)),
         "theta_stability": theta_stability,
@@ -276,6 +343,47 @@ def _write_fold_csv(path, param_names, fold_results):
                 + theta_row
                 + [r["train_score"], r["held_out_score"], r["n_train"], r["n_test"]]
             )
+
+
+# Columns mirror run_algorithms.py's results.csv exactly for the first 10
+# fields (and score_grid_json), so rows from both files can be filtered by
+# algorithm/grid_id and compared directly (e.g. a literature-default
+# "pooled" row from run_algorithms.csv against the matching "cv_held_out"
+# row here). fold/theta_json/data_dir are CV-specific additions.
+PREDICTIONS_FIELDNAMES = [
+    "grid_id", "traj_id", "mode_type", "algorithm", "score_type",
+    "predicted_col", "predicted_row", "true_coin_col", "true_coin_row",
+    "manhattan_dist", "fold", "theta_json", "data_dir", "score_grid_json",
+]
+
+
+def _predictions_to_csv_rows(algo_display_name, score_type, held_out_rows):
+    """Convert one algorithm's pooled held-out-fold predictions (every grid
+    appears exactly once, in whichever fold held it out) into rows matching
+    PREDICTIONS_FIELDNAMES / run_algorithms.py's results.csv schema."""
+    rows = []
+    for r in held_out_rows:
+        theta = r["theta"]
+        theta_list = list(theta) if isinstance(theta, tuple) else [theta]
+        rows.append(
+            {
+                "grid_id": r["label"],
+                "traj_id": "AGG",
+                "mode_type": "cv_held_out",
+                "algorithm": algo_display_name,
+                "score_type": score_type,
+                "predicted_col": r["pred"][0],
+                "predicted_row": r["pred"][1],
+                "true_coin_col": r["coin_pos"][0],
+                "true_coin_row": r["coin_pos"][1],
+                "manhattan_dist": r["dist"],
+                "fold": r["fold"],
+                "theta_json": json.dumps(theta_list),
+                "data_dir": r["data_dir"],
+                "score_grid_json": ra._grid_to_json(r["score_grid"]),
+            }
+        )
+    return rows
 
 
 def _write_summary_json(path, name, param_names, result, meta):
@@ -372,11 +480,18 @@ def _plot_surprise(path, full_loss_curve, best_theta):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
+# Display name / score_type must match run_algorithms.py's ALGORITHMS /
+# _ALGO_SCORE_TYPES exactly, so predictions written here line up with rows
+# for the same algorithm in run_algorithms.py's results.csv.
+_ALGO_DISPLAY_NAME = {"inv_planning": "Inv. Planning", "surprise_v2": "Surprise v2"}
+
+
 def run_and_report(
-    name, param_names, candidates, grids, score_fn, executor, k, seed, effort, out_dir
+    name, param_names, candidates, grids, score_fn, predict_fn,
+    executor, k, seed, effort, out_dir,
 ):
     t0 = time.time()
-    result = cross_validate(candidates, grids, score_fn, executor, k=k, seed=seed)
+    result = cross_validate(candidates, grids, score_fn, predict_fn, executor, k=k, seed=seed)
     elapsed = time.time() - t0
     _print_report(name, param_names, result)
     print(f"  ({elapsed:.1f}s)")
@@ -400,7 +515,13 @@ def run_and_report(
             result["full_loss_curve"],
             result["full_data_best"]["theta"],
         )
-    return result
+
+    display_name = _ALGO_DISPLAY_NAME[name]
+    score_type = ra._ALGO_SCORE_TYPES[display_name]
+    prediction_rows = _predictions_to_csv_rows(
+        display_name, score_type, result["held_out_rows"]
+    )
+    return result, prediction_rows
 
 
 def main():
@@ -430,37 +551,50 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    all_prediction_rows = []
     with ProcessPoolExecutor(max_workers=args.max_workers) as executor:
         if args.model in ("inv_planning", "both"):
-            run_and_report(
+            _, rows = run_and_report(
                 "inv_planning",
                 ["beta"],
                 BETA_CANDIDATES,
                 grids,
                 score_inv_planning,
+                predict_inv_planning,
                 executor,
                 args.k,
                 args.seed,
                 args.effort,
                 out_dir,
             )
+            all_prediction_rows.extend(rows)
 
         if args.model in ("surprise_v2", "both"):
             candidates = list(
                 itertools.product(LAMBDA_CANDIDATES, GAMMA_CANDIDATES, ALPHA_CANDIDATES)
             )
-            run_and_report(
+            _, rows = run_and_report(
                 "surprise_v2",
                 ["lambda", "gamma", "alpha"],
                 candidates,
                 grids,
                 score_surprise_v2,
+                predict_surprise_v2,
                 executor,
                 args.k,
                 args.seed,
                 args.effort,
                 out_dir,
             )
+            all_prediction_rows.extend(rows)
+
+    if all_prediction_rows:
+        csv_path = out_dir / "results.csv"
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=PREDICTIONS_FIELDNAMES)
+            writer.writeheader()
+            writer.writerows(all_prediction_rows)
+        print(f"\n→ Saved {csv_path} ({len(all_prediction_rows)} held-out predictions)")
 
 
 if __name__ == "__main__":
