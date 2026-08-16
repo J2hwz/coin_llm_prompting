@@ -197,6 +197,9 @@ WARP.md
 
 # Claude Code
 .claude/
+CLAUDE.md
+issues.md
+writeup.md
 
 # SFT output files
 *.jsonl
@@ -229,4 +232,6 @@ coin_trajectories/
 # analysis/outputs/*
 analysis/archive/
 # !analysis/outputs/*.ipynb
-# !analysis/outputs/*.Rmd
+analysis/outputs/figures/
+
+algorithms/results/
