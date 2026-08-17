@@ -1,6 +1,6 @@
 # Evaluating the Instrumental Goals of Large Language Models
 
-Experiments running LLMs as agents in gridworld environments, collecting trajectories with token-level logprobs for mechanistic interpretability analysis.
+Experiments running LLMs as agents in gridworld environments involving a coin, collecting action trajectories.
 
 ---
 
